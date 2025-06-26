@@ -654,14 +654,6 @@ public class IndicesOptions implements ToXContentFragment {
         return LENIENT_EXPAND_OPEN_CLOSED_HIDDEN;
     }
 
-    public IndicesOptions mergeWith(IndicesOptions indicesOptions) {
-        EnumSet<Option> newOptions = EnumSet.copyOf(this.options);
-        EnumSet<WildcardStates> newExpandWildcards = EnumSet.copyOf(this.expandWildcards);
-        newOptions.addAll(indicesOptions.options);
-        newExpandWildcards.addAll(indicesOptions.expandWildcards);
-        return new IndicesOptions(newOptions, newExpandWildcards);
-    }
-
     @Override
     public boolean equals(Object obj) {
         if (obj == null) {

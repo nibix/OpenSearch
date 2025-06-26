@@ -34,10 +34,8 @@ package org.opensearch.action.search;
 
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
-import org.opensearch.action.support.TransportIndicesResolvingAction;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.block.ClusterBlockLevel;
-import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.settings.Settings;
@@ -53,9 +51,6 @@ import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
 import org.opensearch.transport.client.node.NodeClient;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
@@ -67,15 +62,13 @@ import java.util.function.LongSupplier;
  *
  * @opensearch.internal
  */
-public class TransportMultiSearchAction extends HandledTransportAction<MultiSearchRequest, MultiSearchResponse> implements
-    TransportIndicesResolvingAction<MultiSearchRequest> {
+public class TransportMultiSearchAction extends HandledTransportAction<MultiSearchRequest, MultiSearchResponse> {
 
     private final int allocatedProcessors;
     private final ThreadPool threadPool;
     private final ClusterService clusterService;
     private final LongSupplier relativeTimeProvider;
     private final NodeClient client;
-    private final TransportSearchAction transportSearchAction;
 
     @Inject
     public TransportMultiSearchAction(
@@ -84,8 +77,7 @@ public class TransportMultiSearchAction extends HandledTransportAction<MultiSear
         TransportService transportService,
         ClusterService clusterService,
         ActionFilters actionFilters,
-        NodeClient client,
-        TransportSearchAction transportSearchAction
+        NodeClient client
     ) {
         super(MultiSearchAction.NAME, transportService, actionFilters, (Writeable.Reader<MultiSearchRequest>) MultiSearchRequest::new);
         this.threadPool = threadPool;
@@ -93,7 +85,6 @@ public class TransportMultiSearchAction extends HandledTransportAction<MultiSear
         this.allocatedProcessors = OpenSearchExecutors.allocatedProcessors(settings);
         this.relativeTimeProvider = System::nanoTime;
         this.client = client;
-        this.transportSearchAction = transportSearchAction;
     }
 
     TransportMultiSearchAction(
@@ -103,8 +94,7 @@ public class TransportMultiSearchAction extends HandledTransportAction<MultiSear
         ClusterService clusterService,
         int allocatedProcessors,
         LongSupplier relativeTimeProvider,
-        NodeClient client,
-        TransportSearchAction transportSearchAction
+        NodeClient client
     ) {
         super(MultiSearchAction.NAME, transportService, actionFilters, (Writeable.Reader<MultiSearchRequest>) MultiSearchRequest::new);
         this.threadPool = threadPool;
@@ -112,7 +102,6 @@ public class TransportMultiSearchAction extends HandledTransportAction<MultiSear
         this.allocatedProcessors = allocatedProcessors;
         this.relativeTimeProvider = relativeTimeProvider;
         this.client = client;
-        this.transportSearchAction = transportSearchAction;
     }
 
     @Override
@@ -253,17 +242,6 @@ public class TransportMultiSearchAction extends HandledTransportAction<MultiSear
             return task != null && task.isCancelled();
         }
         return false;
-    }
-
-    @Override
-    public ResolvedIndices resolveIndices(MultiSearchRequest request) {
-        List<SearchRequest> requests = request.requests();
-        List<ResolvedIndices> resolvedIndicesList = new ArrayList<>();
-        for(SearchRequest searchRequest : requests) {
-            ResolvedIndices resolvedIndices = transportSearchAction.resolveIndices(searchRequest);
-            resolvedIndicesList.add(resolvedIndices);
-        }
-        return resolvedIndicesList.stream().reduce(ResolvedIndices.of(Collections.emptySet()), ResolvedIndices::add);
     }
 
     /**

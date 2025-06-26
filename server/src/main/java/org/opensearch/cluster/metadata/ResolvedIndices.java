@@ -71,9 +71,7 @@ public class ResolvedIndices {
         return new ResolvedIndices(new Local(Collections.unmodifiableSet(indexSet), null, false), Collections.emptyMap());
     }
 
-    private static final Local LOCAL_ALL = new Local(Set.of(Metadata.ALL), null, true);
-    private static final ResolvedIndices ALL = new ResolvedIndices(LOCAL_ALL, Collections.emptyMap());
-
+    private static final ResolvedIndices ALL = new ResolvedIndices(new Local(Set.of(Metadata.ALL), null, true), Collections.emptyMap());
 
     private final Local local;
     private final Map<String, OriginalIndices> remote;
@@ -81,37 +79,6 @@ public class ResolvedIndices {
     private ResolvedIndices(Local local, Map<String, OriginalIndices> remote) {
         this.local = local;
         this.remote = remote;
-    }
-
-    private ResolvedIndices addLocal(Local local) {
-        if(local == null || local().isEmpty()) {
-            return this;
-        }
-        return new ResolvedIndices(this.local.addLocal(local), this.remote);
-    }
-
-    private ResolvedIndices addRemote(Map<String, OriginalIndices> remote) {
-        if(remote == null || remote.isEmpty()) {
-            return this;
-        }
-        Map<String, OriginalIndices> newRemote = new HashMap<>(this.remote);
-        for(Map.Entry<String, OriginalIndices> entry : remote.entrySet()) {
-            if (newRemote.containsKey(entry.getKey())) {
-                OriginalIndices originalIndices = newRemote.get(entry.getKey());
-                OriginalIndices newOriginalIndices = originalIndices.mergeWith(entry.getValue());
-                newRemote.put(entry.getKey(), newOriginalIndices);
-            } else {
-                newRemote.put(entry.getKey(), entry.getValue());
-            }
-        }
-        return new ResolvedIndices(this.local, Collections.unmodifiableMap(newRemote));
-    }
-
-    public ResolvedIndices add(ResolvedIndices other) {
-        if (other == null || other.isEmpty()) {
-            return this;
-        }
-        return this.addLocal(other.local).addRemote(other.remote);
     }
 
     public Local local() {
@@ -181,19 +148,6 @@ public class ResolvedIndices {
             } else {
                 return this.names.contains(index);
             }
-        }
-
-        public Local addLocal(Local local) {
-            if(this.isAll) {
-                return this;
-            }
-            if(local.isAll) {
-                return local;
-            }
-            Set<String> namesSum = new HashSet<>(this.names);
-            namesSum.addAll(local.names);
-            OriginalIndices newOriginalIndices = this.originalIndices == null ? local.originalIndices : this.originalIndices.mergeWith(local.originalIndices);
-            return new Local(Collections.unmodifiableSet(namesSum), newOriginalIndices, isAll);
         }
     }
 
