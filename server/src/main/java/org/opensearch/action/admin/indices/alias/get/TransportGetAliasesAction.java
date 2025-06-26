@@ -32,6 +32,7 @@
 package org.opensearch.action.admin.indices.alias.get;
 
 import org.opensearch.action.support.ActionFilters;
+import org.opensearch.action.support.TransportIndicesResolvingAction;
 import org.opensearch.action.support.clustermanager.TransportClusterManagerNodeReadAction;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.block.ClusterBlockException;
@@ -39,6 +40,7 @@ import org.opensearch.cluster.block.ClusterBlockLevel;
 import org.opensearch.cluster.metadata.AliasMetadata;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.logging.DeprecationLogger;
@@ -65,7 +67,9 @@ import java.util.stream.Collectors;
  *
  * @opensearch.internal
  */
-public class TransportGetAliasesAction extends TransportClusterManagerNodeReadAction<GetAliasesRequest, GetAliasesResponse> {
+public class TransportGetAliasesAction extends TransportClusterManagerNodeReadAction<GetAliasesRequest, GetAliasesResponse>
+    implements
+        TransportIndicesResolvingAction<GetAliasesRequest> {
     private static final DeprecationLogger deprecationLogger = DeprecationLogger.getLogger(TransportGetAliasesAction.class);
 
     private final SystemIndices systemIndices;
@@ -193,6 +197,14 @@ public class TransportGetAliasesAction extends TransportClusterManagerNodeReadAc
                     + "access to system indices and their aliases will not be allowed",
                 systemAliases
             );
+        }
+    }
+
+    @Override
+    public ResolvedIndices resolveIndices(GetAliasesRequest request) {
+        ClusterState state = this.clusterService.state();
+        try (ThreadContext.StoredContext ignore = threadPool.getThreadContext().newStoredContext(false)) {
+            return ResolvedIndices.of(indexNameExpressionResolver.concreteIndexNames(state, request));
         }
     }
 }

@@ -68,6 +68,7 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.metadata.RepositoriesMetadata;
+import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.cluster.node.DiscoveryNodes;
 import org.opensearch.cluster.routing.IndexRoutingTable;
@@ -355,7 +356,7 @@ public class SnapshotsService extends AbstractLifecycleComponent implements Clus
                 );
                 ensureBelowConcurrencyLimit(repositoryName, snapshotName, snapshots, deletionsInProgress);
                 // Store newSnapshot here to be processed in clusterStateProcessed
-                List<String> indices = Arrays.asList(indexNameExpressionResolver.concreteIndexNames(currentState, request));
+                List<String> indices = Arrays.asList(resolveIndices(currentState, request));
 
                 final List<String> dataStreams = indexNameExpressionResolver.dataStreamNames(
                     currentState,
@@ -454,6 +455,22 @@ public class SnapshotsService extends AbstractLifecycleComponent implements Clus
                 return request.clusterManagerNodeTimeout();
             }
         }, "create_snapshot [" + snapshotName + ']', listener::onFailure);
+    }
+
+    private String[] resolveIndices(ClusterState currentState, CreateSnapshotRequest request) {
+        return indexNameExpressionResolver.concreteIndexNames(currentState, request);
+    }
+
+    public ResolvedIndices resolveIndices(CreateSnapshotRequest request) {
+        ClusterState currentState = clusterService.state();
+        final List<String> dataStreams = indexNameExpressionResolver.dataStreamNames(
+            currentState,
+            request.indicesOptions(),
+            request.indices()
+        );
+        List<String> result = new ArrayList<>(dataStreams);
+        result.addAll(Arrays.asList(resolveIndices(currentState, request)));
+        return ResolvedIndices.of(result);
     }
 
     /**
