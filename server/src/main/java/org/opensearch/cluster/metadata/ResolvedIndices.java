@@ -37,7 +37,11 @@ import java.util.stream.Stream;
  * </ul>
  */
 public class ResolvedIndices {
+
     public static ResolvedIndices of(String... indices) {
+        if(indices == null || indices.length == 0) {
+            return EMPTY;
+        }
         return new ResolvedIndices(
             new Local(Collections.unmodifiableSet(new HashSet<>(Arrays.asList(indices))), null, false),
             Collections.emptyMap()
@@ -72,6 +76,7 @@ public class ResolvedIndices {
     }
 
     private static final ResolvedIndices ALL = new ResolvedIndices(new Local(Set.of(Metadata.ALL), null, true), Collections.emptyMap());
+    private static final ResolvedIndices EMPTY = new ResolvedIndices(new Local(Set.of(), null, false), Collections.emptyMap());
 
     private final Local local;
     private final Map<String, OriginalIndices> remote;
