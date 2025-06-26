@@ -39,6 +39,8 @@ import org.opensearch.core.common.io.stream.StreamOutput;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 /**
  * Used to keep track of original indices within internal (e.g. shard level) requests
@@ -91,5 +93,21 @@ public final class OriginalIndices implements IndicesRequest {
     @Override
     public String toString() {
         return "OriginalIndices{" + "indices=" + Arrays.toString(indices) + ", indicesOptions=" + indicesOptions + '}';
+    }
+
+    public OriginalIndices mergeWith(OriginalIndices value) {
+        if(value == null) {
+            return this;
+        }
+        Set<String> set = new LinkedHashSet<>();
+        if (this.indices != null) {
+            java.util.Collections.addAll(set, this.indices);
+        }
+        if (value.indices != null) {
+            java.util.Collections.addAll(set, value.indices);
+        }
+        String[] newIndices = set.toArray(new String[0]);
+        IndicesOptions newOptions = this.indicesOptions.mergeWith(value.indicesOptions);
+        return new OriginalIndices(newIndices, newOptions);
     }
 }

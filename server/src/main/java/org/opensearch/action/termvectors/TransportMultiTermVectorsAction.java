@@ -35,9 +35,11 @@ package org.opensearch.action.termvectors;
 import org.opensearch.action.RoutingMissingException;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
+import org.opensearch.action.support.TransportIndicesResolvingAction;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.block.ClusterBlockLevel;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.common.util.concurrent.AtomicArray;
@@ -47,7 +49,9 @@ import org.opensearch.index.IndexNotFoundException;
 import org.opensearch.tasks.Task;
 import org.opensearch.transport.TransportService;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -56,7 +60,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * @opensearch.internal
  */
-public class TransportMultiTermVectorsAction extends HandledTransportAction<MultiTermVectorsRequest, MultiTermVectorsResponse> {
+public class TransportMultiTermVectorsAction extends HandledTransportAction<MultiTermVectorsRequest, MultiTermVectorsResponse> implements
+    TransportIndicesResolvingAction<MultiTermVectorsRequest> {
 
     private final ClusterService clusterService;
     private final TransportShardMultiTermsVectorAction shardAction;
@@ -185,5 +190,28 @@ public class TransportMultiTermVectorsAction extends HandledTransportAction<Mult
                 }
             });
         }
+    }
+
+    @Override
+    public ResolvedIndices resolveIndices(MultiTermVectorsRequest request) {
+        ClusterState clusterState = clusterService.state();
+        clusterState.blocks().globalBlockedRaiseException(ClusterBlockLevel.READ);
+        List<String> indices = new ArrayList<>();
+
+
+        Map<ShardId, MultiTermVectorsShardRequest> shardRequests = new HashMap<>();
+        for (int i = 0; i < request.requests.size(); i++) {
+            TermVectorsRequest termVectorsRequest = request.requests.get(i);
+            String routing = clusterState.metadata().resolveIndexRouting(termVectorsRequest.routing(), termVectorsRequest.index());
+            if (!clusterState.metadata().hasConcreteIndex(termVectorsRequest.index())) {
+                continue;
+            }
+            String concreteSingleIndex = indexNameExpressionResolver.concreteSingleIndex(clusterState, termVectorsRequest).getName();
+            if (routing == null && clusterState.getMetadata().routingRequired(concreteSingleIndex)) {
+                continue;
+            }
+            indices.add(concreteSingleIndex);
+        }
+        return ResolvedIndices.of(indices);
     }
 }

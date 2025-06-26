@@ -35,10 +35,12 @@ package org.opensearch.action.get;
 import org.opensearch.action.RoutingMissingException;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
+import org.opensearch.action.support.TransportIndicesResolvingAction;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.block.ClusterBlockLevel;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.Metadata;
+import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.routing.Preference;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
@@ -48,7 +50,9 @@ import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.tasks.Task;
 import org.opensearch.transport.TransportService;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -57,7 +61,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * @opensearch.internal
  */
-public class TransportMultiGetAction extends HandledTransportAction<MultiGetRequest, MultiGetResponse> {
+public class TransportMultiGetAction extends HandledTransportAction<MultiGetRequest, MultiGetResponse> implements TransportIndicesResolvingAction<MultiGetRequest> {
 
     private final ClusterService clusterService;
     private final TransportShardMultiGetAction shardAction;
@@ -173,5 +177,25 @@ public class TransportMultiGetAction extends HandledTransportAction<MultiGetRequ
 
     private static MultiGetItemResponse newItemFailure(String index, String id, Exception exception) {
         return new MultiGetItemResponse(null, new MultiGetResponse.Failure(index, id, exception));
+    }
+
+    @Override
+    public ResolvedIndices resolveIndices(MultiGetRequest request) {
+        // TODO do we need these preconditions?
+        ClusterState clusterState = clusterService.state();
+        clusterState.blocks().globalBlockedRaiseException(ClusterBlockLevel.READ);
+
+        List<String> indices = new ArrayList<>();
+
+        for (MultiGetRequest.Item item : request.items) {
+            try {
+                String concreteSingleIndex = indexNameExpressionResolver.concreteSingleIndex(clusterState, item).getName();
+                indices.add(concreteSingleIndex);
+            } catch (Exception e) {
+                // Multi get should not fail if one request is invalid
+            }
+
+        }
+        return ResolvedIndices.of(indices);
     }
 }
