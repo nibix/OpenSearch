@@ -32,25 +32,34 @@
 
 package org.opensearch.index.reindex;
 
+import org.opensearch.action.search.SearchRequest;
+import org.opensearch.action.search.SearchRequestIndicesResolver;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
+import org.opensearch.action.support.TransportIndicesResolvingAction;
+import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.common.io.stream.Writeable;
 import org.opensearch.script.ScriptService;
 import org.opensearch.tasks.Task;
 import org.opensearch.threadpool.ThreadPool;
+import org.opensearch.transport.RemoteClusterService;
 import org.opensearch.transport.TransportService;
 import org.opensearch.transport.client.Client;
 import org.opensearch.transport.client.ParentTaskAssigningClient;
 
-public class TransportDeleteByQueryAction extends HandledTransportAction<DeleteByQueryRequest, BulkByScrollResponse> {
+public class TransportDeleteByQueryAction extends HandledTransportAction<DeleteByQueryRequest, BulkByScrollResponse> implements
+    TransportIndicesResolvingAction<DeleteByQueryRequest> {
 
     private final ThreadPool threadPool;
     private final Client client;
     private final ScriptService scriptService;
     private final ClusterService clusterService;
+    private final SearchRequestIndicesResolver searchRequestIndicesResolver;
 
     @Inject
     public TransportDeleteByQueryAction(
@@ -59,8 +68,10 @@ public class TransportDeleteByQueryAction extends HandledTransportAction<DeleteB
         Client client,
         TransportService transportService,
         ScriptService scriptService,
-        ClusterService clusterService
-    ) {
+        ClusterService clusterService,
+        IndexNameExpressionResolver indexNameExpressionResolver,
+        NamedWriteableRegistry namedWritableRegistry,
+        RemoteClusterService remoteClusterService) {
         super(
             DeleteByQueryAction.NAME,
             transportService,
@@ -71,6 +82,7 @@ public class TransportDeleteByQueryAction extends HandledTransportAction<DeleteB
         this.client = client;
         this.scriptService = scriptService;
         this.clusterService = clusterService;
+        this.searchRequestIndicesResolver = new SearchRequestIndicesResolver(clusterService, indexNameExpressionResolver, namedWritableRegistry, remoteClusterService);
     }
 
     @Override
@@ -93,5 +105,11 @@ public class TransportDeleteByQueryAction extends HandledTransportAction<DeleteB
                     .start();
             }
         );
+    }
+
+    @Override
+    public ResolvedIndices resolveIndices(DeleteByQueryRequest request) {
+        SearchRequest searchRequest = request.getSearchRequest();
+        return searchRequestIndicesResolver.resolveIndices(searchRequest);
     }
 }

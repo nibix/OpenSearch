@@ -32,17 +32,22 @@
 package org.opensearch.action.support.clustermanager.info;
 
 import org.opensearch.action.support.ActionFilters;
+import org.opensearch.action.support.TransportIndicesResolvingAction;
 import org.opensearch.action.support.clustermanager.TransportClusterManagerNodeReadAction;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.block.ClusterBlockException;
 import org.opensearch.cluster.block.ClusterBlockLevel;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.action.ActionResponse;
+import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.Writeable;
 import org.opensearch.threadpool.ThreadPool;
 import org.opensearch.transport.TransportService;
+
+import java.io.IOException;
 
 /**
  * Perform cluster information action
@@ -50,7 +55,7 @@ import org.opensearch.transport.TransportService;
  * @opensearch.internal
  */
 public abstract class TransportClusterInfoAction<Request extends ClusterInfoRequest<Request>, Response extends ActionResponse> extends
-    TransportClusterManagerNodeReadAction<Request, Response> {
+    TransportClusterManagerNodeReadAction<Request, Response> implements TransportIndicesResolvingAction<Request> {
 
     public TransportClusterInfoAction(
         String actionName,
@@ -74,13 +79,22 @@ public abstract class TransportClusterInfoAction<Request extends ClusterInfoRequ
     @Override
     protected ClusterBlockException checkBlock(Request request, ClusterState state) {
         return state.blocks()
-            .indicesBlockedException(ClusterBlockLevel.METADATA_READ, indexNameExpressionResolver.concreteIndexNames(state, request));
+            .indicesBlockedException(ClusterBlockLevel.METADATA_READ, resolveIndices(state, request));
     }
 
     @Override
     protected final void clusterManagerOperation(final Request request, final ClusterState state, final ActionListener<Response> listener) {
-        String[] concreteIndices = indexNameExpressionResolver.concreteIndexNames(state, request);
+        String[] concreteIndices = resolveIndices(state, request);
         doClusterManagerOperation(request, concreteIndices, state, listener);
+    }
+
+    private String[] resolveIndices(ClusterState state, Request request) {
+        return indexNameExpressionResolver.concreteIndexNames(state, request);
+    }
+
+    @Override
+    public ResolvedIndices resolveIndices(Request request) {
+        return ResolvedIndices.of(resolveIndices(clusterService.state(), request));
     }
 
     protected abstract void doClusterManagerOperation(

@@ -34,12 +34,17 @@ package org.opensearch.index.reindex;
 
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.index.IndexRequest;
+import org.opensearch.action.search.SearchRequestIndicesResolver;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.HandledTransportAction;
+import org.opensearch.action.support.TransportIndicesResolvingAction;
 import org.opensearch.cluster.ClusterState;
+import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.common.io.stream.Writeable;
 import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.mapper.IndexFieldMapper;
@@ -55,12 +60,14 @@ import org.opensearch.transport.client.ParentTaskAssigningClient;
 import java.util.Map;
 import java.util.function.BiFunction;
 
-public class TransportUpdateByQueryAction extends HandledTransportAction<UpdateByQueryRequest, BulkByScrollResponse> {
+public class TransportUpdateByQueryAction extends HandledTransportAction<UpdateByQueryRequest, BulkByScrollResponse> implements
+    TransportIndicesResolvingAction<UpdateByQueryRequest> {
 
     private final ThreadPool threadPool;
     private final Client client;
     private final ScriptService scriptService;
     private final ClusterService clusterService;
+    private final SearchRequestIndicesResolver searchRequestIndicesResolver;
 
     @Inject
     public TransportUpdateByQueryAction(
@@ -69,8 +76,9 @@ public class TransportUpdateByQueryAction extends HandledTransportAction<UpdateB
         Client client,
         TransportService transportService,
         ScriptService scriptService,
-        ClusterService clusterService
-    ) {
+        ClusterService clusterService,
+        IndexNameExpressionResolver indexNameExpressionResolver,
+        NamedWriteableRegistry namedWriteableRegistry) {
         super(
             UpdateByQueryAction.NAME,
             transportService,
@@ -81,6 +89,8 @@ public class TransportUpdateByQueryAction extends HandledTransportAction<UpdateB
         this.client = client;
         this.scriptService = scriptService;
         this.clusterService = clusterService;
+        this.searchRequestIndicesResolver = new SearchRequestIndicesResolver(clusterService, indexNameExpressionResolver, namedWriteableRegistry,
+            transportService.getRemoteClusterService());
     }
 
     @Override
@@ -104,6 +114,11 @@ public class TransportUpdateByQueryAction extends HandledTransportAction<UpdateB
                     .start();
             }
         );
+    }
+
+    @Override
+    public ResolvedIndices resolveIndices(UpdateByQueryRequest request) {
+        return searchRequestIndicesResolver.resolveIndices(request.getSearchRequest());
     }
 
     /**

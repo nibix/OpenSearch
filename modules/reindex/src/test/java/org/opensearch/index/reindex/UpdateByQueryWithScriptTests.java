@@ -79,8 +79,9 @@ public class UpdateByQueryWithScriptTests extends AbstractAsyncBulkByScrollActio
             null,
             transportService,
             scriptService,
-            null
-        );
+            null,
+            null,
+            null);
         return new TransportUpdateByQueryAction.AsyncIndexBySearchAction(
             task,
             logger,
