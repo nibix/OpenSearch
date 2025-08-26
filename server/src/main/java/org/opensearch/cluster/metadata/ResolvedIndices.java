@@ -9,6 +9,7 @@
 package org.opensearch.cluster.metadata;
 
 import org.opensearch.action.OriginalIndices;
+import org.opensearch.common.annotation.PublicApi;
 import org.opensearch.core.index.Index;
 
 import java.util.Arrays;
@@ -36,7 +37,9 @@ import java.util.stream.Stream;
  *     just taken without further evaluation</li>
  * </ul>
  */
+@PublicApi(since = "3.2.0")
 public class ResolvedIndices {
+
     public static ResolvedIndices of(String... indices) {
         return new ResolvedIndices(
             new Local(Collections.unmodifiableSet(new HashSet<>(Arrays.asList(indices))), null, false),
@@ -111,6 +114,7 @@ public class ResolvedIndices {
     /**
      * Encapsulates the local (i.e., non-remote) indices referenced by the respective request.
      */
+    @PublicApi(since = "3.2.0")
     public static class Local {
         private final Set<String> names;
         private final OriginalIndices originalIndices;

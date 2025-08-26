@@ -38,6 +38,7 @@ import org.opensearch.action.ActionType;
 import org.opensearch.action.IndicesRequest;
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.IndicesOptions;
+import org.opensearch.action.support.TransportIndicesResolvingAction;
 import org.opensearch.action.support.clustermanager.AcknowledgedResponse;
 import org.opensearch.action.support.clustermanager.ClusterManagerNodeRequest;
 import org.opensearch.action.support.clustermanager.TransportClusterManagerNodeAction;
@@ -49,6 +50,7 @@ import org.opensearch.cluster.metadata.DataStream;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.metadata.MetadataDeleteIndexService;
+import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.service.ClusterManagerTaskThrottler;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.Priority;
@@ -169,7 +171,9 @@ public class DeleteDataStreamAction extends ActionType<AcknowledgedResponse> {
      *
      * @opensearch.internal
      */
-    public static class TransportAction extends TransportClusterManagerNodeAction<Request, AcknowledgedResponse> {
+    public static class TransportAction extends TransportClusterManagerNodeAction<Request, AcknowledgedResponse>
+        implements
+            TransportIndicesResolvingAction<Request> {
 
         private final MetadataDeleteIndexService deleteIndexService;
         private final ClusterManagerTaskThrottler.ThrottlingKey removeDataStreamTaskKey;
@@ -235,17 +239,8 @@ public class DeleteDataStreamAction extends ActionType<AcknowledgedResponse> {
         }
 
         static ClusterState removeDataStream(MetadataDeleteIndexService deleteIndexService, ClusterState currentState, Request request) {
-            Set<String> dataStreams = new HashSet<>();
-            Set<String> snapshottingDataStreams = new HashSet<>();
-            for (String name : request.names) {
-                for (String dataStreamName : currentState.metadata().dataStreams().keySet()) {
-                    if (Regex.simpleMatch(name, dataStreamName)) {
-                        dataStreams.add(dataStreamName);
-                    }
-                }
-
-                snapshottingDataStreams.addAll(SnapshotsService.snapshottingDataStreams(currentState, dataStreams));
-            }
+            Set<String> dataStreams = resolveDataStreams(currentState, request);
+            Set<String> snapshottingDataStreams = new HashSet<>(SnapshotsService.snapshottingDataStreams(currentState, dataStreams));
 
             if (snapshottingDataStreams.isEmpty() == false) {
                 throw new SnapshotInProgressException(
@@ -273,6 +268,25 @@ public class DeleteDataStreamAction extends ActionType<AcknowledgedResponse> {
             }
             currentState = ClusterState.builder(currentState).metadata(metadata).build();
             return deleteIndexService.deleteIndices(currentState, backingIndicesToRemove);
+        }
+
+        private static Set<String> resolveDataStreams(ClusterState currentState, Request request) {
+            Set<String> dataStreams = new HashSet<>();
+            for (String name : request.names) {
+                for (String dataStreamName : currentState.metadata().dataStreams().keySet()) {
+                    if (Regex.simpleMatch(name, dataStreamName)) {
+                        dataStreams.add(dataStreamName);
+                    }
+                }
+            }
+            return dataStreams;
+        }
+
+        @Override
+        public ResolvedIndices resolveIndices(Request request) {
+            ClusterState currentState = clusterService.state();
+            Set<String> dataStreams = resolveDataStreams(currentState, request);
+            return ResolvedIndices.of(dataStreams);
         }
 
         @Override

@@ -33,11 +33,13 @@
 package org.opensearch.action.admin.cluster.snapshots.create;
 
 import org.opensearch.action.support.ActionFilters;
+import org.opensearch.action.support.TransportIndicesResolvingAction;
 import org.opensearch.action.support.clustermanager.TransportClusterManagerNodeAction;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.block.ClusterBlockException;
 import org.opensearch.cluster.block.ClusterBlockLevel;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
+import org.opensearch.cluster.metadata.ResolvedIndices;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.inject.Inject;
 import org.opensearch.core.action.ActionListener;
@@ -57,7 +59,9 @@ import static org.opensearch.repositories.blobstore.BlobStoreRepository.SHALLOW_
  *
  * @opensearch.internal
  */
-public class TransportCreateSnapshotAction extends TransportClusterManagerNodeAction<CreateSnapshotRequest, CreateSnapshotResponse> {
+public class TransportCreateSnapshotAction extends TransportClusterManagerNodeAction<CreateSnapshotRequest, CreateSnapshotResponse>
+    implements
+        TransportIndicesResolvingAction<CreateSnapshotRequest> {
     private final SnapshotsService snapshotsService;
 
     private final RepositoriesService repositoriesService;
@@ -120,5 +124,10 @@ public class TransportCreateSnapshotAction extends TransportClusterManagerNodeAc
         } else {
             snapshotsService.createSnapshot(request, ActionListener.map(listener, snapshot -> new CreateSnapshotResponse()));
         }
+    }
+
+    @Override
+    public ResolvedIndices resolveIndices(CreateSnapshotRequest request) {
+        return snapshotsService.resolveIndices(request);
     }
 }
