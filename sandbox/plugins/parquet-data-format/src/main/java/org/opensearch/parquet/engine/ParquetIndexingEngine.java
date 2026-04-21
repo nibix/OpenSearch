@@ -11,7 +11,12 @@ package org.opensearch.parquet.engine;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.cluster.metadata.CryptoMetadata;
+import org.opensearch.common.crypto.DataKeyPair;
+import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.crypto.CryptoHandlerRegistry;
+import org.opensearch.crypto.CryptoRegistryException;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
 import org.opensearch.index.engine.dataformat.Merger;
@@ -23,10 +28,12 @@ import org.opensearch.index.engine.exec.commit.IndexStoreProvider;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.store.FormatChecksumStrategy;
 import org.opensearch.index.store.PrecomputedChecksumStrategy;
+import org.opensearch.parquet.bridge.ParquetModularEncryptionConfig;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.memory.ArrowBufferPool;
 import org.opensearch.parquet.writer.ParquetDocumentInput;
 import org.opensearch.parquet.writer.ParquetWriter;
+import org.opensearch.plugins.CryptoKeyProviderPlugin;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.io.IOException;
@@ -70,6 +77,7 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
     private final Settings settings;
     private final ThreadPool threadPool;
     private final FormatChecksumStrategy checksumStrategy;
+    private final ParquetModularEncryptionConfig encryptionConfig;
 
     /**
      * Creates a new ParquetIndexingEngine.
@@ -123,6 +131,7 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
         this.settings = settings;
         this.threadPool = threadPool;
         this.checksumStrategy = checksumStrategy;
+        this.encryptionConfig = initializeEncryption(indexSettings);
         try {
             Files.createDirectory(shardPath.resolve("parquet"));
         } catch (FileAlreadyExistsException ex) {
@@ -156,7 +165,8 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
             bufferPool,
             settings,
             threadPool,
-            checksumStrategy
+            checksumStrategy,
+            encryptionConfig
         );
     }
 
@@ -220,5 +230,64 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
     @Override
     public void close() throws IOException {
         bufferPool.close();
+    }
+
+    /**
+     * Prototypische PME-Aktivierung:
+     * - Nur wenn {@code index.store.crypto.*} gesetzt ist.
+     * - Fail-fast falls Registry/KMS nicht verfuegbar ist.
+     * - Bezieht Data Keys ueber den regulaeren KMS-Pfad (CryptoHandlerRegistry + MasterKeyProvider).
+     */
+    private static ParquetModularEncryptionConfig initializeEncryption(IndexSettings indexSettings) {
+        if (indexSettings == null) {
+            return null;
+        }
+        CryptoMetadata cryptoMetadata = CryptoMetadata.fromIndexSettings(indexSettings.getSettings());
+        if (cryptoMetadata == null) {
+            return null;
+        }
+
+        CryptoHandlerRegistry cryptoHandlerRegistry = CryptoHandlerRegistry.getInstance();
+        if (cryptoHandlerRegistry == null) {
+            throw new IllegalStateException("CryptoHandlerRegistry is not initialized");
+        }
+        if (cryptoHandlerRegistry.fetchCryptoHandler(cryptoMetadata) == null) {
+            throw new CryptoRegistryException(
+                cryptoMetadata.keyProviderName(),
+                cryptoMetadata.keyProviderType(),
+                "Crypto handler not found for parquet modular encryption"
+            );
+        }
+
+        CryptoKeyProviderPlugin keyProviderPlugin = cryptoHandlerRegistry.getCryptoKeyProviderPlugin(cryptoMetadata.keyProviderType());
+        if (keyProviderPlugin == null) {
+            throw new CryptoRegistryException(
+                cryptoMetadata.keyProviderName(),
+                cryptoMetadata.keyProviderType(),
+                "Crypto key provider plugin not found for parquet modular encryption"
+            );
+        }
+
+        // Design-Entscheidung: Wir nutzen denselben KMS-Provider-Pfad wie andere verschluesselte
+        // Komponenten in OpenSearch, damit Schluesselverwaltung und Auditing konsistent bleiben.
+        final DataKeyPair dataKeyPair;
+        try (MasterKeyProvider keyProvider = keyProviderPlugin.createKeyProvider(cryptoMetadata)) {
+            dataKeyPair = keyProvider.generateDataPair();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to generate parquet footer data key via KMS provider", e);
+        }
+
+        if (dataKeyPair == null || dataKeyPair.getRawKey() == null || dataKeyPair.getEncryptedKey() == null) {
+            throw new IllegalStateException("KMS provider returned an invalid data key pair for parquet modular encryption");
+        }
+
+        return new ParquetModularEncryptionConfig(
+            cryptoMetadata.keyProviderName(),
+            cryptoMetadata.keyProviderType(),
+            cryptoMetadata.getKeyArn().orElse(""),
+            cryptoMetadata.getEncryptionContext().orElse(""),
+            dataKeyPair.getRawKey(),
+            dataKeyPair.getEncryptedKey()
+        );
     }
 }

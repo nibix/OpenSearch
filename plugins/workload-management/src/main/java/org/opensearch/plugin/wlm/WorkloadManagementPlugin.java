@@ -112,10 +112,25 @@ public class WorkloadManagementPlugin extends Plugin
     private AutoTaggingActionFilter autoTaggingActionFilter;
     private final Map<Attribute, AttributeExtractorExtension> attributeExtractorExtensions = new HashMap<>();
 
-    /**
-     * Default constructor
-     */
     public WorkloadManagementPlugin() {}
+
+    @Override
+    public List<RestHandler> getRestHandlers(
+        Settings settings,
+        RestController restController,
+        ClusterSettings clusterSettings,
+        IndexScopedSettings indexScopedSettings,
+        SettingsFilter settingsFilter,
+        IndexNameExpressionResolver indexNameExpressionResolver,
+        Supplier<DiscoveryNodes> nodesInCluster
+    ) {
+        return List.of(
+            new RestCreateWorkloadGroupAction(wlmClusterSettingValuesProvider),
+            new RestGetWorkloadGroupAction(),
+            new RestDeleteWorkloadGroupAction(wlmClusterSettingValuesProvider),
+            new RestUpdateWorkloadGroupAction(wlmClusterSettingValuesProvider)
+        );
+    }
 
     @Override
     public Collection<Object> createComponents(
@@ -200,23 +215,7 @@ public class WorkloadManagementPlugin extends Plugin
         return List.of(new SystemIndexDescriptor(INDEX_NAME, "System index used for storing workload_group rules"));
     }
 
-    @Override
-    public List<RestHandler> getRestHandlers(
-        Settings settings,
-        RestController restController,
-        ClusterSettings clusterSettings,
-        IndexScopedSettings indexScopedSettings,
-        SettingsFilter settingsFilter,
-        IndexNameExpressionResolver indexNameExpressionResolver,
-        Supplier<DiscoveryNodes> nodesInCluster
-    ) {
-        return List.of(
-            new RestCreateWorkloadGroupAction(wlmClusterSettingValuesProvider),
-            new RestGetWorkloadGroupAction(),
-            new RestDeleteWorkloadGroupAction(wlmClusterSettingValuesProvider),
-            new RestUpdateWorkloadGroupAction(wlmClusterSettingValuesProvider)
-        );
-    }
+
 
     @Override
     public List<Setting<?>> getSettings() {

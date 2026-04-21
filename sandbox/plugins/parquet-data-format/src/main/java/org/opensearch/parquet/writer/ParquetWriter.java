@@ -17,6 +17,7 @@ import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.store.FormatChecksumStrategy;
 import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.ParquetFileMetadata;
+import org.opensearch.parquet.bridge.ParquetModularEncryptionConfig;
 import org.opensearch.parquet.engine.ParquetDataFormat;
 import org.opensearch.parquet.memory.ArrowBufferPool;
 import org.opensearch.parquet.vsr.VSRManager;
@@ -68,10 +69,30 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
         ThreadPool threadPool,
         FormatChecksumStrategy checksumStrategy
     ) {
+        this(file, writerGeneration, dataFormat, schema, bufferPool, settings, threadPool, checksumStrategy, null);
+    }
+
+    /**
+     * Erstellt einen ParquetWriter mit optionaler PME-Konfiguration.
+     *
+     * <p>Design-Entscheidung: Die Verschluesselung wird einmalig beim nativen Writer-Setup
+     * gesetzt und gilt dann fuer die gesamte Datei (Writer-Generation).
+     */
+    public ParquetWriter(
+        String file,
+        long writerGeneration,
+        ParquetDataFormat dataFormat,
+        Schema schema,
+        ArrowBufferPool bufferPool,
+        Settings settings,
+        ThreadPool threadPool,
+        FormatChecksumStrategy checksumStrategy,
+        ParquetModularEncryptionConfig encryptionConfig
+    ) {
         this.file = file;
         this.writerGeneration = writerGeneration;
         this.dataFormat = dataFormat;
-        this.vsrManager = new VSRManager(file, schema, bufferPool, ParquetSettings.MAX_ROWS_PER_VSR.get(settings), threadPool);
+        this.vsrManager = new VSRManager(file, schema, bufferPool, ParquetSettings.MAX_ROWS_PER_VSR.get(settings), threadPool, encryptionConfig);
         this.checksumStrategy = checksumStrategy;
     }
 

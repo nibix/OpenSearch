@@ -65,7 +65,7 @@ pub fn get_temp_file_path(name: &str) -> (tempfile::TempDir, String) {
 
 pub fn create_writer_and_assert_success(filename: &str) -> (Arc<Schema>, i64) {
     let (schema, schema_ptr) = create_test_ffi_schema();
-    let result = NativeParquetWriter::create_writer(filename.to_string(), schema_ptr);
+    let result = NativeParquetWriter::create_writer(filename.to_string(), schema_ptr, None);
     assert!(result.is_ok());
     (schema, schema_ptr)
 }

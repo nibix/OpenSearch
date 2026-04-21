@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>Wraps the stateless JNI methods in {@link RustBridge} with a file-scoped lifecycle:
  * <ol>
- *   <li>{@code new NativeParquetWriter(filePath, schemaAddress)} — creates the native writer</li>
+ *   <li>{@code new NativeParquetWriter(filePath, schemaAddress, encryptionConfig)} — creates the native writer</li>
  *   <li>{@link #write(long, long)} — sends one or more Arrow batches (repeatable)</li>
  *   <li>{@link #flush()} — finalizes the Parquet file and returns metadata</li>
  *   <li>{@link #sync()} — fsyncs the file to durable storage (calls flush if needed)</li>
@@ -41,8 +41,20 @@ public class NativeParquetWriter {
      * @throws IOException if the native writer creation fails
      */
     public NativeParquetWriter(String filePath, long schemaAddress) throws IOException {
+        this(filePath, schemaAddress, null);
+    }
+
+    /**
+     * Creates a new NativeParquetWriter with optional PME settings.
+     *
+     * @param filePath      the path to the Parquet file to write
+     * @param schemaAddress the native memory address of the Arrow schema
+     * @param encryptionConfig optional PME configuration; null keeps the legacy plaintext path
+     * @throws IOException if the native writer creation fails
+     */
+    public NativeParquetWriter(String filePath, long schemaAddress, ParquetModularEncryptionConfig encryptionConfig) throws IOException {
         this.filePath = filePath;
-        RustBridge.createWriter(filePath, schemaAddress);
+        RustBridge.createWriter(filePath, schemaAddress, encryptionConfig);
     }
 
     /**

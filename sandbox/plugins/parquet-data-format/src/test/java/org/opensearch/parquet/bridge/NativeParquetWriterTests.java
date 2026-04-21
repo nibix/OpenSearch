@@ -233,6 +233,44 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
         writer.flush();
     }
 
+    public void testGetFileMetadataForEncryptedFileRequiresDecryptionConfig() throws Exception {
+        String filePath = createTempDir().resolve("encrypted-read.parquet").toString();
+        ParquetModularEncryptionConfig encryptionConfig = new ParquetModularEncryptionConfig(
+            "kms-instance",
+            "aws-kms",
+            "arn:aws:kms:region:acct:key/test",
+            "tenant=t1",
+            new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 },
+            new byte[] { 4, 3, 2, 1 }
+        );
+
+        NativeParquetWriter writer;
+        try (ArrowExport export = exportSchema()) {
+            writer = new NativeParquetWriter(filePath, export.getSchemaAddress(), encryptionConfig);
+        }
+        try (ArrowExport export = exportData(new int[] { 1 }, new String[] { "alice" }, new long[] { 10L })) {
+            writer.write(export.getArrayAddress(), export.getSchemaAddress());
+        }
+        writer.flush();
+
+        expectThrows(IOException.class, () -> RustBridge.getFileMetadata(filePath));
+        ParquetFileMetadata decryptedMetadata = RustBridge.getFileMetadata(filePath, encryptionConfig);
+        assertEquals(1L, decryptedMetadata.numRows());
+
+        long decryptedRows = RustBridge.getDecryptedNumRows(filePath, encryptionConfig);
+        assertEquals(1L, decryptedRows);
+
+        ParquetModularEncryptionConfig wrongKeyConfig = new ParquetModularEncryptionConfig(
+            "kms-instance",
+            "aws-kms",
+            "arn:aws:kms:region:acct:key/test",
+            "tenant=t1",
+            new byte[] { 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9 },
+            new byte[] { 4, 3, 2, 1 }
+        );
+        expectThrows(IOException.class, () -> RustBridge.getDecryptedNumRows(filePath, wrongKeyConfig));
+    }
+
     private NativeParquetWriter createWriter(String filePath) throws Exception {
         try (ArrowExport export = exportSchema()) {
             return new NativeParquetWriter(filePath, export.getSchemaAddress());

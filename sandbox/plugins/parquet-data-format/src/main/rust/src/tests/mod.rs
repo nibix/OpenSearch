@@ -7,7 +7,7 @@
  */
 
 use crate::test_utils::*;
-use crate::writer::{NativeParquetWriter, WRITER_MANAGER, FILE_MANAGER};
+use crate::writer::{NativeParquetWriter, ParquetEncryptionOptions, WRITER_MANAGER, FILE_MANAGER};
 
 use parquet::file::reader::FileReader;
 use std::fs::File;
@@ -26,7 +26,7 @@ fn test_create_writer_success() {
 fn test_create_writer_invalid_path() {
     let invalid_path = "/invalid/path/that/does/not/exist/test.parquet";
     let (_schema, schema_ptr) = create_test_ffi_schema();
-    let result = NativeParquetWriter::create_writer(invalid_path.to_string(), schema_ptr);
+    let result = NativeParquetWriter::create_writer(invalid_path.to_string(), schema_ptr, None);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("No such file or directory"));
     cleanup_ffi_schema(schema_ptr);
@@ -35,7 +35,7 @@ fn test_create_writer_invalid_path() {
 #[test]
 fn test_create_writer_invalid_schema_pointer() {
     let (_temp_dir, filename) = get_temp_file_path("invalid_schema.parquet");
-    let result = NativeParquetWriter::create_writer(filename, 0);
+    let result = NativeParquetWriter::create_writer(filename, 0, None);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("Invalid schema address"));
 }
@@ -44,10 +44,151 @@ fn test_create_writer_invalid_schema_pointer() {
 fn test_create_writer_multiple_times_same_file() {
     let (_temp_dir, filename) = get_temp_file_path("duplicate.parquet");
     let (_schema, schema_ptr) = create_writer_and_assert_success(&filename);
-    let result2 = NativeParquetWriter::create_writer(filename.clone(), schema_ptr);
+    let result2 = NativeParquetWriter::create_writer(filename.clone(), schema_ptr, None);
     assert!(result2.is_err());
     assert!(result2.unwrap_err().to_string().contains("Writer already exists"));
     close_writer_and_cleanup_schema(&filename, schema_ptr);
+}
+
+#[test]
+fn test_create_writer_with_prototype_pme_sets_metadata_markers() {
+    let (_temp_dir, filename) = get_temp_file_path("prototype_pme.parquet");
+    let (_schema, schema_ptr) = create_test_ffi_schema();
+    let encryption_options = Some(ParquetEncryptionOptions {
+        kms_instance_id: "kms-test-id".to_string(),
+        kms_instance_type: "aws-kms".to_string(),
+        kms_key_arn: "arn:aws:kms:region:acct:key/123".to_string(),
+        kms_encryption_context: "tenant=test".to_string(),
+        // PME akzeptiert AES-Key-Groessen (16/24/32 Byte). Fuer den Prototyp nutzen wir 16 Byte.
+        footer_key: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        wrapped_footer_key: vec![10, 20, 30, 40],
+    });
+
+    let result = NativeParquetWriter::create_writer(filename.clone(), schema_ptr, encryption_options);
+    assert!(result.is_ok());
+
+    let finalize_result = NativeParquetWriter::finalize_writer(filename.clone()).unwrap().unwrap();
+    let kv_metadata = finalize_result.metadata.file_metadata().key_value_metadata();
+    assert!(kv_metadata.is_some());
+    let metadata = kv_metadata.unwrap();
+
+    let enabled = metadata.iter().any(|kv| kv.key == "opensearch.pme.enabled" && kv.value.as_deref() == Some("true"));
+    assert!(enabled, "prototype PME marker metadata should exist");
+    let wrapped_len_marker = metadata
+        .iter()
+        .any(|kv| kv.key == "opensearch.pme.wrapped_footer_key_len" && kv.value.as_deref() == Some("4"));
+    assert!(wrapped_len_marker, "wrapped footer key marker metadata should exist");
+
+    FILE_MANAGER.remove(&filename);
+    cleanup_ffi_schema(schema_ptr);
+}
+
+#[test]
+fn test_get_file_metadata_decrypted_with_footer_key() {
+    let (_temp_dir, filename) = get_temp_file_path("prototype_pme_decrypted_read.parquet");
+    let (_schema, schema_ptr) = create_test_ffi_schema();
+    let footer_key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    let encryption_options = Some(ParquetEncryptionOptions {
+        kms_instance_id: "kms-test-id".to_string(),
+        kms_instance_type: "aws-kms".to_string(),
+        kms_key_arn: "arn:aws:kms:region:acct:key/123".to_string(),
+        kms_encryption_context: "tenant=test".to_string(),
+        footer_key: footer_key.clone(),
+        wrapped_footer_key: vec![10, 20, 30, 40],
+    });
+
+    NativeParquetWriter::create_writer(filename.clone(), schema_ptr, encryption_options).unwrap();
+    let (array_ptr, data_schema_ptr) = create_test_ffi_data().unwrap();
+    NativeParquetWriter::write_data(filename.clone(), array_ptr, data_schema_ptr).unwrap();
+    cleanup_ffi_data(array_ptr, data_schema_ptr);
+    NativeParquetWriter::finalize_writer(filename.clone()).unwrap();
+
+    let decrypted_metadata = NativeParquetWriter::get_file_metadata_decrypted(filename.clone(), footer_key).unwrap();
+    assert_eq!(decrypted_metadata.num_rows(), 3);
+
+    FILE_MANAGER.remove(&filename);
+    cleanup_ffi_schema(schema_ptr);
+}
+
+#[test]
+fn test_get_file_metadata_decrypted_with_wrong_footer_key_fails() {
+    let (_temp_dir, filename) = get_temp_file_path("prototype_pme_wrong_key_read.parquet");
+    let (_schema, schema_ptr) = create_test_ffi_schema();
+    let encryption_options = Some(ParquetEncryptionOptions {
+        kms_instance_id: "kms-test-id".to_string(),
+        kms_instance_type: "aws-kms".to_string(),
+        kms_key_arn: "arn:aws:kms:region:acct:key/123".to_string(),
+        kms_encryption_context: "tenant=test".to_string(),
+        footer_key: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        wrapped_footer_key: vec![10, 20, 30, 40],
+    });
+
+    NativeParquetWriter::create_writer(filename.clone(), schema_ptr, encryption_options).unwrap();
+    NativeParquetWriter::finalize_writer(filename.clone()).unwrap();
+
+    let result = NativeParquetWriter::get_file_metadata_decrypted(
+        filename.clone(),
+        vec![9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9],
+    );
+    assert!(result.is_err());
+
+    FILE_MANAGER.remove(&filename);
+    cleanup_ffi_schema(schema_ptr);
+}
+
+#[test]
+fn test_get_decrypted_num_rows_with_footer_key() {
+    let (_temp_dir, filename) = get_temp_file_path("prototype_pme_decrypted_payload_rows.parquet");
+    let (_schema, schema_ptr) = create_test_ffi_schema();
+    let footer_key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    let encryption_options = Some(ParquetEncryptionOptions {
+        kms_instance_id: "kms-test-id".to_string(),
+        kms_instance_type: "aws-kms".to_string(),
+        kms_key_arn: "arn:aws:kms:region:acct:key/123".to_string(),
+        kms_encryption_context: "tenant=test".to_string(),
+        footer_key: footer_key.clone(),
+        wrapped_footer_key: vec![10, 20, 30, 40],
+    });
+
+    NativeParquetWriter::create_writer(filename.clone(), schema_ptr, encryption_options).unwrap();
+    for _ in 0..2 {
+        let (array_ptr, data_schema_ptr) = create_test_ffi_data().unwrap();
+        NativeParquetWriter::write_data(filename.clone(), array_ptr, data_schema_ptr).unwrap();
+        cleanup_ffi_data(array_ptr, data_schema_ptr);
+    }
+    NativeParquetWriter::finalize_writer(filename.clone()).unwrap();
+
+    let num_rows = NativeParquetWriter::get_decrypted_num_rows(filename.clone(), footer_key).unwrap();
+    assert_eq!(num_rows, 6);
+
+    FILE_MANAGER.remove(&filename);
+    cleanup_ffi_schema(schema_ptr);
+}
+
+#[test]
+fn test_get_decrypted_num_rows_with_wrong_footer_key_fails() {
+    let (_temp_dir, filename) = get_temp_file_path("prototype_pme_decrypted_payload_wrong_key.parquet");
+    let (_schema, schema_ptr) = create_test_ffi_schema();
+    let encryption_options = Some(ParquetEncryptionOptions {
+        kms_instance_id: "kms-test-id".to_string(),
+        kms_instance_type: "aws-kms".to_string(),
+        kms_key_arn: "arn:aws:kms:region:acct:key/123".to_string(),
+        kms_encryption_context: "tenant=test".to_string(),
+        footer_key: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        wrapped_footer_key: vec![10, 20, 30, 40],
+    });
+
+    NativeParquetWriter::create_writer(filename.clone(), schema_ptr, encryption_options).unwrap();
+    NativeParquetWriter::finalize_writer(filename.clone()).unwrap();
+
+    let result = NativeParquetWriter::get_decrypted_num_rows(
+        filename.clone(),
+        vec![9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9],
+    );
+    assert!(result.is_err());
+
+    FILE_MANAGER.remove(&filename);
+    cleanup_ffi_schema(schema_ptr);
 }
 
 #[test]
@@ -125,7 +266,7 @@ fn test_finalize_writer_with_data_returns_correct_metadata() {
     let metadata = result.unwrap().unwrap();
     assert_eq!(metadata.metadata.file_metadata().num_rows(), 6);
     assert!(metadata.metadata.file_metadata().version() > 0);
-    assert_eq!(metadata.metadata.file_metadata().schema_descr().num_columns(), 3); // root + 2 fields (id, name)
+    assert_eq!(metadata.metadata.file_metadata().schema_descr().num_columns(), 2);
     assert_ne!(metadata.crc32, 0, "CRC32 should be non-zero for a file with data");
     FILE_MANAGER.remove(&filename);
     cleanup_ffi_schema(schema_ptr);
@@ -146,7 +287,7 @@ fn test_close_multiple_times_same_file() {
     assert!(result1.is_ok());
     let metadata = result1.unwrap();
     assert!(metadata.is_some());
-    assert_eq!(metadata.unwrap().metadata.num_rows, 0);
+    assert_eq!(metadata.unwrap().metadata.file_metadata().num_rows(), 0);
     assert!(!WRITER_MANAGER.contains_key(&filename));
     assert!(FILE_MANAGER.contains_key(&filename));
     let result2 = NativeParquetWriter::finalize_writer(filename.clone());
@@ -184,7 +325,6 @@ fn test_get_filtered_writer_memory_usage_with_writers() {
     let result = NativeParquetWriter::get_filtered_writer_memory_usage(prefix);
     assert!(result.is_ok());
     let _memory_usage = result.unwrap();
-    assert!(_memory_usage >= 0);
     close_writer_and_cleanup_schema(&filename1, schema_ptr1);
     close_writer_and_cleanup_schema(&filename2, schema_ptr2);
 }

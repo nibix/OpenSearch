@@ -11,7 +11,12 @@ use arrow::record_batch::RecordBatch;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression;
+use parquet::encryption::decrypt::FileDecryptionProperties;
+use parquet::encryption::encrypt::FileEncryptionProperties;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use std::fs::File;
@@ -54,6 +59,7 @@ impl Write for Crc32Writer {
 }
 
 /// Result from finalizing a writer: Parquet metadata + whole-file CRC32.
+#[derive(Debug)]
 pub struct FinalizeResult {
     pub metadata: parquet::file::metadata::ParquetMetaData,
     pub crc32: u32,
@@ -66,8 +72,27 @@ lazy_static! {
 
 pub struct NativeParquetWriter;
 
+/// Prototypische PME-Eingabe aus der Java-Bridge.
+///
+/// Wichtige Entscheidung:
+/// - Der erste Integrationsschritt validiert und transportiert KMS/Key-Material bis zum Writer.
+/// - Der Datenpfad bleibt kompatibel (falls keine Optionen gesetzt sind, unveraenderter Plaintext-Pfad).
+/// - Wir schreiben KMS-Kontext als Custom Metadata in die Datei, damit der End-to-End-Pfad testbar bleibt.
+pub struct ParquetEncryptionOptions {
+    pub kms_instance_id: String,
+    pub kms_instance_type: String,
+    pub kms_key_arn: String,
+    pub kms_encryption_context: String,
+    pub footer_key: Vec<u8>,
+    pub wrapped_footer_key: Vec<u8>,
+}
+
 impl NativeParquetWriter {
-    pub fn create_writer(filename: String, schema_address: i64) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn create_writer(
+        filename: String,
+        schema_address: i64,
+        encryption_options: Option<ParquetEncryptionOptions>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         log_debug!("create_writer called for file: {}, schema_address: {}", filename, schema_address);
 
         if (schema_address as *mut u8).is_null() {
@@ -87,12 +112,55 @@ impl NativeParquetWriter {
         let file_clone = file.try_clone()?;
         FILE_MANAGER.insert(filename.clone(), file_clone);
 
-        let props = WriterProperties::builder()
+        let mut props_builder = WriterProperties::builder()
             .set_compression(Compression::LZ4_RAW)
             .set_bloom_filter_enabled(true)
             .set_bloom_filter_fpp(0.1)
-            .set_bloom_filter_ndv(100000)
-            .build();
+            .set_bloom_filter_ndv(100000);
+
+        if let Some(options) = encryption_options {
+            // Design-Entscheidung: fuer den Prototyp aktivieren wir echte PME (Footer + Daten)
+            // mit dem vom Java/KMS-Pfad gelieferten Data Key. Der gewrappte Footer-Key wird als
+            // footer_key_metadata mitgegeben, damit Reader-Seite spaeter denselben KMS-Flow nutzen kann.
+            let file_encryption_properties = FileEncryptionProperties::builder(options.footer_key.clone())
+                .with_footer_key_metadata(options.wrapped_footer_key.clone())
+                .build()?;
+            props_builder = props_builder.with_file_encryption_properties(file_encryption_properties);
+
+            // Zusaetzliche Marker helfen beim Debugging und beim schnellen E2E-Nachweis im Prototyp.
+            props_builder = props_builder.set_key_value_metadata(Some(vec![
+                KeyValue {
+                    key: "opensearch.pme.enabled".to_string(),
+                    value: Some("true".to_string()),
+                },
+                KeyValue {
+                    key: "opensearch.pme.kms.instance_id".to_string(),
+                    value: Some(options.kms_instance_id),
+                },
+                KeyValue {
+                    key: "opensearch.pme.kms.instance_type".to_string(),
+                    value: Some(options.kms_instance_type),
+                },
+                KeyValue {
+                    key: "opensearch.pme.kms.key_arn".to_string(),
+                    value: Some(options.kms_key_arn),
+                },
+                KeyValue {
+                    key: "opensearch.pme.kms.encryption_context".to_string(),
+                    value: Some(options.kms_encryption_context),
+                },
+                KeyValue {
+                    key: "opensearch.pme.footer_key_len".to_string(),
+                    value: Some(options.footer_key.len().to_string()),
+                },
+                KeyValue {
+                    key: "opensearch.pme.wrapped_footer_key_len".to_string(),
+                    value: Some(options.wrapped_footer_key.len().to_string()),
+                },
+            ]));
+        }
+
+        let props = props_builder.build();
         let crc_writer = Crc32Writer::new(file);
         let writer = ArrowWriter::try_new(crc_writer, schema, Some(props))?;
         WRITER_MANAGER.insert(filename, Arc::new(Mutex::new(writer)));
@@ -191,5 +259,39 @@ impl NativeParquetWriter {
         let file_metadata = reader.metadata().file_metadata().clone();
         log_debug!("Metadata for {}: version={}, num_rows={}", filename, file_metadata.version(), file_metadata.num_rows());
         Ok(file_metadata)
+    }
+
+    pub fn get_file_metadata_decrypted(
+        filename: String,
+        footer_key: Vec<u8>,
+    ) -> Result<parquet::file::metadata::FileMetaData, Box<dyn std::error::Error>> {
+        let file = File::open(&filename)?;
+        let decryption_properties = FileDecryptionProperties::builder(footer_key).build()?;
+        let options = ArrowReaderOptions::new().with_file_decryption_properties(decryption_properties);
+        let metadata = ArrowReaderMetadata::load(&file, options)?;
+        let file_metadata = metadata.metadata().file_metadata().clone();
+        log_debug!(
+            "Decrypted metadata for {}: version={}, num_rows={}",
+            filename,
+            file_metadata.version(),
+            file_metadata.num_rows()
+        );
+        Ok(file_metadata)
+    }
+
+    pub fn get_decrypted_num_rows(
+        filename: String,
+        footer_key: Vec<u8>,
+    ) -> Result<i64, Box<dyn std::error::Error>> {
+        let file = File::open(&filename)?;
+        let decryption_properties = FileDecryptionProperties::builder(footer_key).build()?;
+        let options = ArrowReaderOptions::new().with_file_decryption_properties(decryption_properties);
+        let mut reader = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)?.build()?;
+        let mut num_rows: i64 = 0;
+        while let Some(batch) = reader.next() {
+            num_rows += batch?.num_rows() as i64;
+        }
+        log_debug!("Decrypted payload rows for {}: {}", filename, num_rows);
+        Ok(num_rows)
     }
 }

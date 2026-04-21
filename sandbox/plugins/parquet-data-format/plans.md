@@ -1,0 +1,13 @@
+Plan: Parquet PME End-to-End Read-Pfad
+Ziel ist, die bestehende Bridge-Decryption (Parquet PME Prototyp) bis in den produktiven Sandbox-Querypfad durchzuziehen: von Datei-/KMS-Metadaten ueber Reader-Erzeugung bis zur DataFusion-Ausfuehrung. Der Plan minimiert Architekturbruch, definiert klare Akzeptanzkriterien pro Phase und priorisiert fail-closed Verhalten, Rueckwaertskompatibilitaet und nachvollziehbare Tests entlang parquet-data-format, composite-engine, analytics-backend-datafusion und analytics-engine.
+Steps
+Scharfe Zielarchitektur festlegen: Datenvertrag fuer PME-Read definieren (wrappedFooterKey, KMS-Info, AAD-Input) ueber readme-pms.md, WriterFileSet.java, ParquetModularEncryptionConfig.
+Metadatenfluss im Catalog ergaenzen: PME-Envelope pro Datei im Commit-/Snapshot-Pfad transportieren ueber ParquetWriter.java, Segment.java, DataformatAwareCatalogSnapshot.java; Akzeptanz: Restart-stabil, serialisierbar, plaintext unveraendert.
+Reader-seitige Key-Rehydration bauen: In DatafusionReaderManager.java pro Datei wrappedFooterKey ueber MasterKeyProvider.decryptKey aufloesen; Index-Kryptoquelle ueber ReaderManagerConfig.java bzw. Cluster-Kontext erweitern; Akzeptanz: fehlende/ungueltige Keys => klare fail-closed Fehler.
+Native DataFusion Reader-API fuer Decrypt erweitern: Java-FFM Signaturen in NativeBridge.java und Rust-FFM in ffm.rs um Datei->Key-Mapping erweitern; Akzeptanz: Reader kann encrypted und plaintext Dateien im selben Snapshot laden.
+Query/Execution-Decryption aktivieren: Decryption beim Table-/Parquet-Scan in api.rs und query_executor.rs verdrahten, inkl. DatafusionReader/ReaderHandle-Transport in DatafusionReader.java; Akzeptanz: DefaultPlanExecutor-Pfad liefert korrekte Rows fuer encrypted Parquet.
+Testmatrix und Gates schliessen: Unit+E2E erweitern in NativeParquetWriterTests.java, DataFusionQueryExecutionTests.java, DatafusionSearchExecEngineTests.java, optional DSL-Ende-zu-Ende via TransportDslExecuteAction.java; Akzeptanz: encrypted read ok, wrong key failt deterministisch, plaintext Regressionstests gruen.
+Further Considerations
+Vertragsort PME-Metadaten: Option A WriterFileSet erweitern, Option B Datei-Footer on-demand lesen, Option C dedizierte Snapshot-Metadatenstruktur; Empfehlung: A fuer deterministische Rehydration.
+Plugin-Kopplung Risiko: Direkte Abhaengigkeit analytics-backend-datafusion -> parquet-data-format vermeiden; gemeinsame DTO/API besser in sandbox/libs/* auslagern.
+Hauptrisiken: SPI-Serialisierungsaenderungen, DataFusion/Parquet-Decryption-Limits, Key-Lifecycle (Zeroization), Refresh-Latenz durch KMS-Unwrap, Key-Rotation-Handling pro Datei.
