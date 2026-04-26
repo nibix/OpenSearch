@@ -180,7 +180,7 @@ public class DataFormatRegistry {
         Map<DataFormat, EngineReaderManager<?>> readerManagers = new HashMap<>();
         for (Map.Entry<DataFormat, CheckedFunction<ReaderManagerConfig, EngineReaderManager<?>, IOException>> entry : readerManagerBuilders
             .entrySet()) {
-            ReaderManagerConfig settings = new ReaderManagerConfig(indexStoreProvider, entry.getKey(), shardPath);
+            ReaderManagerConfig settings = new ReaderManagerConfig(indexStoreProvider, entry.getKey(), shardPath, Optional.of(indexSettings));
             readerManagers.put(entry.getKey(), entry.getValue().apply(settings));
         }
         return readerManagers;

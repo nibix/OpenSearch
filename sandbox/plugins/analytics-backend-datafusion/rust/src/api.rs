@@ -149,6 +149,7 @@
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use arrow_array::{Array, StructArray};
 use arrow_array::ffi::FFI_ArrowArray;
@@ -199,6 +200,7 @@ pub struct DataFusionRuntime {
 pub(crate) struct ShardView {
     pub table_path: ListingTableUrl,
     pub object_metas: Arc<Vec<object_store::ObjectMeta>>,
+    pub file_footer_keys: Arc<HashMap<String, Vec<u8>>>,
 }
 
 /// Creates a DataFusion global runtime with the given resource limits.
@@ -245,6 +247,7 @@ pub unsafe fn close_global_runtime(ptr: i64) {
 pub fn create_reader(
     table_path: &str,
     mut filenames: Vec<String>,
+    file_footer_keys: HashMap<String, Vec<u8>>,
     tokio_rt_manager: &RuntimeManager,
 ) -> Result<i64, DataFusionError> {
     filenames.sort();
@@ -263,6 +266,7 @@ pub fn create_reader(
     let shard_view = ShardView {
         table_path: table_url,
         object_metas: Arc::new(object_metas),
+        file_footer_keys: Arc::new(file_footer_keys),
     };
     Ok(Box::into_raw(Box::new(shard_view)) as i64)
 }
@@ -297,6 +301,7 @@ pub async unsafe fn execute_query(
 
     let table_path = shard_view.table_path.clone();
     let object_metas = shard_view.object_metas.clone();
+    let file_footer_keys = shard_view.file_footer_keys.clone();
     let cpu_executor = manager.cpu_executor();
 
     let result = crate::query_executor::execute_query(
@@ -304,6 +309,7 @@ pub async unsafe fn execute_query(
         object_metas,
         table_name.to_string(),
         plan_bytes.to_vec(),
+        file_footer_keys,
         runtime,
         cpu_executor,
     )

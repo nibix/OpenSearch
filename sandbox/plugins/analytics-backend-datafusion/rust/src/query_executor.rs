@@ -6,8 +6,11 @@
  * compatible open source license.
  */
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use arrow::datatypes::SchemaRef;
 use datafusion::{
     common::DataFusionError,
     datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
@@ -17,18 +20,64 @@ use datafusion::{
     physical_plan::execute_stream,
     prelude::*,
 };
+use datafusion_common::config::EncryptionFactoryOptions;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::execution::cache::cache_manager::CacheManagerConfig;
 use datafusion::execution::cache::{CacheAccessor, DefaultListFilesCache};
+use datafusion_execution::parquet_encryption::EncryptionFactory;
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use log::error;
 use object_store::ObjectMeta;
+use object_store::path::Path;
+use parquet::encryption::decrypt::FileDecryptionProperties;
+use parquet::encryption::encrypt::FileEncryptionProperties;
 use prost::Message;
 use substrait::proto::Plan;
 
 use crate::cross_rt_stream::CrossRtStream;
 use crate::executor::DedicatedExecutor;
 use crate::api::DataFusionRuntime;
+
+const OPENSEARCH_PME_FACTORY_ID: &str = "opensearch_pme";
+
+#[derive(Debug)]
+struct OpenSearchPmeDecryptionFactory {
+    file_footer_keys: Arc<HashMap<String, Vec<u8>>>,
+}
+
+impl OpenSearchPmeDecryptionFactory {
+    fn new(file_footer_keys: Arc<HashMap<String, Vec<u8>>>) -> Self {
+        Self { file_footer_keys }
+    }
+}
+
+#[async_trait]
+impl EncryptionFactory for OpenSearchPmeDecryptionFactory {
+    async fn get_file_encryption_properties(
+        &self,
+        _config: &EncryptionFactoryOptions,
+        _schema: &SchemaRef,
+        _file_path: &Path,
+    ) -> datafusion_common::Result<Option<Arc<FileEncryptionProperties>>> {
+        Ok(None)
+    }
+
+    async fn get_file_decryption_properties(
+        &self,
+        _config: &EncryptionFactoryOptions,
+        file_path: &Path,
+    ) -> datafusion_common::Result<Option<Arc<FileDecryptionProperties>>> {
+        match self.file_footer_keys.get(file_path.filename()) {
+            Some(footer_key) => {
+                let properties = FileDecryptionProperties::builder(footer_key.clone())
+                    .build()
+                    .map_err(|e| DataFusionError::Execution(format!("Failed to build PME decryption properties: {}", e)))?;
+                Ok(Some(Arc::new(properties)))
+            }
+            None => Ok(None),
+        }
+    }
+}
 
 /// Execute a vanilla parquet query: substrait plan → DataFusion → CrossRtStream.
 /// File access goes through DataFusion's registered object store.
@@ -37,6 +86,7 @@ pub async fn execute_query(
     object_metas: Arc<Vec<ObjectMeta>>,
     table_name: String,
     plan_bytes: Vec<u8>,
+    file_footer_keys: Arc<HashMap<String, Vec<u8>>>,
     runtime: &DataFusionRuntime,
     cpu_executor: DedicatedExecutor,
 ) -> Result<i64, DataFusionError> {
@@ -67,11 +117,21 @@ pub async fn execute_query(
             e
         })?;
 
+    if file_footer_keys.is_empty() == false {
+        runtime_env.register_parquet_encryption_factory(
+            OPENSEARCH_PME_FACTORY_ID,
+            Arc::new(OpenSearchPmeDecryptionFactory::new(Arc::clone(&file_footer_keys))),
+        );
+    }
+
     // Build a fresh session state per query. TODO : Tune this during planning per query
     let mut config = SessionConfig::new();
     config.options_mut().execution.parquet.pushdown_filters = false;
     config.options_mut().execution.target_partitions = 4;
     config.options_mut().execution.batch_size = 8192;
+    if file_footer_keys.is_empty() == false {
+        config.options_mut().execution.parquet.crypto.factory_id = Some(OPENSEARCH_PME_FACTORY_ID.to_string());
+    }
 
     let state = SessionStateBuilder::new()
         .with_config(config)

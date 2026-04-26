@@ -9,6 +9,7 @@
 package org.opensearch.index.engine.dataformat;
 
 import org.opensearch.common.annotation.ExperimentalApi;
+import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.commit.IndexStoreProvider;
 import org.opensearch.index.shard.ShardPath;
 
@@ -22,9 +23,18 @@ import java.util.Optional;
  * @param indexStoreProvider the store provider, or empty if not available
  * @param format the data format to create a reader manager for
  * @param shardPath the shard path for file storage
+ * @param indexSettings the index settings, or empty if not available
  *
  * @opensearch.experimental
  */
 @ExperimentalApi
-public record ReaderManagerConfig(Optional<IndexStoreProvider> indexStoreProvider, DataFormat format, ShardPath shardPath) {
+public record ReaderManagerConfig(
+	Optional<IndexStoreProvider> indexStoreProvider,
+	DataFormat format,
+	ShardPath shardPath,
+	Optional<IndexSettings> indexSettings
+) {
+	public ReaderManagerConfig(Optional<IndexStoreProvider> indexStoreProvider, DataFormat format, ShardPath shardPath) {
+		this(indexStoreProvider, format, shardPath, Optional.empty());
+	}
 }

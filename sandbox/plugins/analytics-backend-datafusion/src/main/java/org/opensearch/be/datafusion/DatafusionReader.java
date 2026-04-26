@@ -16,7 +16,10 @@ import org.opensearch.index.engine.exec.WriterFileSet;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
+import java.util.Map;
 
 /**
  * DataFusion reader for JNI operations.
@@ -40,12 +43,24 @@ public class DatafusionReader implements Closeable {
      * @param files The file metadata collection
      */
     public DatafusionReader(String directoryPath, Collection<WriterFileSet> files) {
+        this(directoryPath, files, Map.of());
+    }
+
+    public DatafusionReader(String directoryPath, Collection<WriterFileSet> files, Map<String, byte[]> fileFooterKeys) {
         this.directoryPath = directoryPath;
         String[] fileNames = new String[0];
         if (files != null) {
             fileNames = files.stream().flatMap(writerFileSet -> writerFileSet.files().stream()).toArray(String[]::new);
         }
-        readerHandle = new ReaderHandle(directoryPath, fileNames);
+        List<String> encryptedFilesList = new ArrayList<>(fileFooterKeys.size());
+        List<byte[]> footerKeysList = new ArrayList<>(fileFooterKeys.size());
+        for (Map.Entry<String, byte[]> entry : fileFooterKeys.entrySet()) {
+            encryptedFilesList.add(entry.getKey());
+            footerKeysList.add(entry.getValue());
+        }
+        String[] encryptedFiles = encryptedFilesList.toArray(String[]::new);
+        byte[][] footerKeys = footerKeysList.toArray(new byte[0][]);
+        readerHandle = new ReaderHandle(directoryPath, fileNames, encryptedFiles, footerKeys);
     }
 
     /**

@@ -90,6 +90,12 @@ public final class NativeBridge {
                 ValueLayout.JAVA_LONG,
                 ValueLayout.ADDRESS,
                 ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
+                ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG
             )
         );
@@ -177,10 +183,32 @@ public final class NativeBridge {
      * Freed by {@link #closeDatafusionReader}.
      */
     public static long createDatafusionReader(String path, String[] files) {
+        return createDatafusionReader(path, files, new String[0], new byte[0][]);
+    }
+
+    public static long createDatafusionReader(String path, String[] files, String[] encryptedFiles, byte[][] footerKeys) {
+        if (encryptedFiles.length != footerKeys.length) {
+            throw new IllegalArgumentException("encryptedFiles and footerKeys must have same length");
+        }
         try (var call = new NativeCall()) {
             var p = call.str(path);
             var f = call.strArray(files);
-            return call.invoke(CREATE_READER, p.segment(), p.len(), f.ptrs(), f.lens(), f.count());
+            var ef = call.strArray(encryptedFiles);
+            var keys = call.bytesArray(footerKeys);
+            return call.invoke(
+                CREATE_READER,
+                p.segment(),
+                p.len(),
+                f.ptrs(),
+                f.lens(),
+                f.count(),
+                ef.ptrs(),
+                ef.lens(),
+                ef.count(),
+                keys.ptrs(),
+                keys.lens(),
+                keys.count()
+            );
         }
     }
 

@@ -25,6 +25,9 @@ import org.opensearch.threadpool.ThreadPool;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Base64;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Parquet file writer integrating OpenSearch's {@link Writer} interface with the VSR batching layer.
@@ -46,6 +49,7 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     private final ParquetDataFormat dataFormat;
     private final VSRManager vsrManager;
     private final FormatChecksumStrategy checksumStrategy;
+    private final ParquetModularEncryptionConfig encryptionConfig;
 
     /**
      * Creates a new ParquetWriter.
@@ -94,6 +98,7 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
         this.dataFormat = dataFormat;
         this.vsrManager = new VSRManager(file, schema, bufferPool, ParquetSettings.MAX_ROWS_PER_VSR.get(settings), threadPool, encryptionConfig);
         this.checksumStrategy = checksumStrategy;
+        this.encryptionConfig = encryptionConfig;
     }
 
     @Override
@@ -122,7 +127,28 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
             .addFile(fileName)
             .addNumRows(metadata.numRows())
             .build();
+
+        if (encryptionConfig != null) {
+            writerFileSet = WriterFileSet.builder()
+                .directory(filePath.getParent().getFileName())
+                .writerGeneration(writerGeneration)
+                .addFile(fileName)
+                .addNumRows(metadata.numRows())
+                .addFileMetadata(fileName, buildPmeMetadata(encryptionConfig))
+                .build();
+        }
         return FileInfos.builder().putWriterFileSet(dataFormat, writerFileSet).build();
+    }
+
+    private static Map<String, String> buildPmeMetadata(ParquetModularEncryptionConfig config) {
+        Map<String, String> metadata = new HashMap<>();
+        metadata.put("opensearch.pme.encrypted", "true");
+        metadata.put("opensearch.pme.kms.instance_id", config.kmsInstanceId());
+        metadata.put("opensearch.pme.kms.instance_type", config.kmsInstanceType());
+        metadata.put("opensearch.pme.kms.key_arn", config.kmsKeyArn());
+        metadata.put("opensearch.pme.kms.encryption_context", config.kmsEncryptionContext());
+        metadata.put("opensearch.pme.wrapped_footer_key_b64", Base64.getEncoder().encodeToString(config.wrappedFooterKey()));
+        return metadata;
     }
 
     @Override

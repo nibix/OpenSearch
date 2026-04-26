@@ -17,6 +17,7 @@ import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
+import org.opensearch.parquet.bridge.ParquetModularEncryptionConfig;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.engine.ParquetDataFormat;
 import org.opensearch.parquet.fields.ArrowFieldRegistry;
@@ -29,7 +30,9 @@ import org.opensearch.threadpool.ThreadPool;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 
 public class ParquetWriterTests extends OpenSearchTestCase {
 
@@ -182,6 +185,47 @@ public class ParquetWriterTests extends OpenSearchTestCase {
         writer.flush();
         writer.sync();
         assertTrue(Files.exists(Path.of(filePath)));
+    }
+
+    public void testFlushPersistsPerFilePmeMetadata() throws Exception {
+        String filePath = createTempDir().resolve("encrypted.parquet").toString();
+        byte[] wrappedFooterKey = randomByteArrayOfLength(32);
+        ParquetModularEncryptionConfig encryptionConfig = new ParquetModularEncryptionConfig(
+            "kms-instance-1",
+            "aws-kms",
+            "arn:aws:kms:us-east-1:111111111111:key/test",
+            "ctx=test",
+            randomByteArrayOfLength(16),
+            wrappedFooterKey
+        );
+        ParquetWriter writer = new ParquetWriter(
+            filePath,
+            1L,
+            new ParquetDataFormat(),
+            schema,
+            bufferPool,
+            Settings.EMPTY,
+            threadPool,
+            null,
+            encryptionConfig
+        );
+
+        ParquetDocumentInput doc = new ParquetDocumentInput();
+        doc.addField(idField, 7);
+        doc.addField(nameField, "enc");
+        doc.addField(scoreField, 700L);
+        writer.addDoc(doc);
+        doc.close();
+
+        FileInfos fileInfos = writer.flush();
+        String fileName = Path.of(filePath).getFileName().toString();
+        Map<String, String> metadata = fileInfos.writerFilesMap().values().iterator().next().metadataForFile(fileName);
+
+        assertEquals("true", metadata.get("opensearch.pme.encrypted"));
+        assertEquals("kms-instance-1", metadata.get("opensearch.pme.kms.instance_id"));
+        assertEquals("aws-kms", metadata.get("opensearch.pme.kms.instance_type"));
+        assertEquals("ctx=test", metadata.get("opensearch.pme.kms.encryption_context"));
+        assertEquals(Base64.getEncoder().encodeToString(wrappedFooterKey), metadata.get("opensearch.pme.wrapped_footer_key_b64"));
     }
 
     private Schema buildSchema(List<MappedFieldType> fieldTypes) {
