@@ -17,6 +17,17 @@ import java.util.Objects;
  * <p>Diese Struktur transportiert nur die minimalen Informationen, die wir fuer den ersten
  * Integrationsschritt benoetigen:
  * KMS-Identitaet + optionalen KMS-Kontext + Footer-Key-Material.
+ *
+ * <p>TODO PME key derivation: {@code footerKey} is currently the raw KMS data key. Production
+ * code should pass an already-derived per-file Parquet key, v1 footer_key_metadata JSON bytes
+ * ({@code version}, {@code data_key_id}, {@code message_id}), and the binary AAD prefix. The
+ * root data key should be hydrated from the Lucene-style index-level keyfile and kept in a scoped
+ * cache, not transported to Rust through this config.
+ *
+ * <p>TODO PME key lifecycle: this object currently stores raw key bytes directly, and callers may
+ * retain it as an engine field for the full shard lifetime. Replace this with a scoped key handle
+ * or cache entry that has explicit expiry, eviction, and best-effort zeroing semantics comparable
+ * to Lucene storage encryption's NodeLevelKeyCache lifecycle.
  */
 public final class ParquetModularEncryptionConfig {
 
@@ -83,4 +94,3 @@ public final class ParquetModularEncryptionConfig {
         return Arrays.copyOf(wrappedFooterKey, wrappedFooterKey.length);
     }
 }
-

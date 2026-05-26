@@ -77,6 +77,9 @@ pub unsafe extern "C" fn parquet_create_writer(
 ) -> i64 {
     let filename = str_from_raw(file_ptr, file_len).map_err(|e| format!("parquet_create_writer: {}", e))?.to_string();
     // Prototyp: Wir aktivieren PME nur, wenn alle KMS-Felder + Footer-Key vorhanden sind.
+    // TODO PME key derivation: once Java owns hydration/derivation, validate that the FFM payload
+    // contains only the final derived AES key, v1 footer_key_metadata JSON bytes, and the binary
+    // AAD prefix. Provider/KMS metadata should stay on the Lucene-style index-level keyfile path.
     let encryption_options = match (
         optional_str_from_raw(kms_instance_id_ptr, kms_instance_id_len),
         optional_str_from_raw(kms_instance_type_ptr, kms_instance_type_len),

@@ -158,6 +158,10 @@ public class RustBridge {
             // Prototyp-Entscheidung: Wir uebergeben rohes Footer-Key-Material plus den gewrappten
             // Footer-Key aus dem KMS. Damit kann Rust echte PME aktivieren und zugleich die KMS-Info
             // fuer spaetere Reader-Integration im Footer-Metadatum verankern.
+            // TODO PME key derivation: once Java derives per-file keys, this call should pass only
+            // the final derived Parquet key, v1 footer_key_metadata JSON bytes, and the binary AAD
+            // prefix. It must not forward an engine-scoped raw root key or provider/KMS metadata
+            // to Rust; provider metadata follows the Lucene-style index-level keyfile path.
             var kmsInstanceId = call.str(encryptionConfig.kmsInstanceId());
             var kmsInstanceType = call.str(encryptionConfig.kmsInstanceType());
             var kmsKeyArn = call.str(encryptionConfig.kmsKeyArn());
@@ -257,6 +261,10 @@ public class RustBridge {
         }
         try (var call = new NativeCall()) {
             var f = call.str(file);
+            // TODO PME key derivation/read path: read v1 footer_key_metadata JSON, resolve
+            // data_key_id="default" to the Lucene-style index-level keyfile, hydrate/cache the
+            // data key through MasterKeyProvider, derive the per-file key from message_id, rebuild
+            // the binary AAD prefix, then pass the derived Parquet key to Rust.
             byte[] footerKeyBytes = encryptionConfig.footerKey();
             var footerKey = call.bytes(footerKeyBytes);
             var versionOut = call.intOut();
@@ -292,6 +300,8 @@ public class RustBridge {
         }
         try (var call = new NativeCall()) {
             var f = call.str(file);
+            // TODO PME key derivation/read path: use the same v1 footer_key_metadata JSON,
+            // index-level keyfile, derived key, and binary AAD prefix as getFileMetadata(...).
             byte[] footerKeyBytes = encryptionConfig.footerKey();
             var footerKey = call.bytes(footerKeyBytes);
             var numRowsOut = call.longOut();

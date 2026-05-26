@@ -78,6 +78,10 @@ pub struct NativeParquetWriter;
 /// - Der erste Integrationsschritt validiert und transportiert KMS/Key-Material bis zum Writer.
 /// - Der Datenpfad bleibt kompatibel (falls keine Optionen gesetzt sind, unveraenderter Plaintext-Pfad).
 /// - Wir schreiben KMS-Kontext als Custom Metadata in die Datei, damit der End-to-End-Pfad testbar bleibt.
+///
+/// TODO PME key derivation: `footer_key` should be the already-derived per-file Parquet key.
+/// Production should also carry v1 footer_key_metadata JSON bytes and the binary AAD prefix,
+/// while root-key hydration stays Java-side through the Lucene-style index-level keyfile.
 pub struct ParquetEncryptionOptions {
     pub kms_instance_id: String,
     pub kms_instance_type: String,
@@ -120,14 +124,23 @@ impl NativeParquetWriter {
 
         if let Some(options) = encryption_options {
             // Design-Entscheidung: fuer den Prototyp aktivieren wir echte PME (Footer + Daten)
-            // mit dem vom Java/KMS-Pfad gelieferten Data Key. Der gewrappte Footer-Key wird als
-            // footer_key_metadata mitgegeben, damit Reader-Seite spaeter denselben KMS-Flow nutzen kann.
+            // mit dem vom Java/KMS-Pfad gelieferten Key. Production should replace the wrapped-key
+            // bytes with v1 footer_key_metadata JSON and pass a matching binary AAD prefix.
+            // TODO PME key derivation: Rust currently treats options.footer_key as the final PME
+            // key. If derivation remains Java-side, reject invalid-length keys here, store only the
+            // JSON footer metadata via with_footer_key_metadata(...), and configure the AAD prefix
+            // with with_aad_prefix(...). Rust should not receive provider/KMS metadata.
             let file_encryption_properties = FileEncryptionProperties::builder(options.footer_key.clone())
                 .with_footer_key_metadata(options.wrapped_footer_key.clone())
                 .build()?;
             props_builder = props_builder.with_file_encryption_properties(file_encryption_properties);
 
             // Zusaetzliche Marker helfen beim Debugging und beim schnellen E2E-Nachweis im Prototyp.
+            // TODO PME metadata ownership: these Parquet key-value markers duplicate Java
+            // WriterFileSet PME metadata with different names and semantics (enabled vs encrypted,
+            // length markers vs wrapped-key bytes). Production should define one documented
+            // contract: PME footer_key_metadata is authoritative for key hydration, while Parquet
+            // key-value metadata is optional debug/validation data or removed entirely.
             props_builder = props_builder.set_key_value_metadata(Some(vec![
                 KeyValue {
                     key: "opensearch.pme.enabled".to_string(),
@@ -266,6 +279,9 @@ impl NativeParquetWriter {
         footer_key: Vec<u8>,
     ) -> Result<parquet::file::metadata::FileMetaData, Box<dyn std::error::Error>> {
         let file = File::open(&filename)?;
+        // TODO PME key derivation/read path: footer_key should already be the derived per-file
+        // key. The read path also needs the binary AAD prefix reconstructed from v1
+        // footer_key_metadata JSON before building decryption properties.
         let decryption_properties = FileDecryptionProperties::builder(footer_key).build()?;
         let options = ArrowReaderOptions::new().with_file_decryption_properties(decryption_properties);
         let metadata = ArrowReaderMetadata::load(&file, options)?;
@@ -284,6 +300,8 @@ impl NativeParquetWriter {
         footer_key: Vec<u8>,
     ) -> Result<i64, Box<dyn std::error::Error>> {
         let file = File::open(&filename)?;
+        // TODO PME key derivation/read path: use the same derived per-file key and binary AAD
+        // prefix as metadata reads so payload access cannot succeed with mismatched metadata.
         let decryption_properties = FileDecryptionProperties::builder(footer_key).build()?;
         let options = ArrowReaderOptions::new().with_file_decryption_properties(decryption_properties);
         let mut reader = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)?.build()?;

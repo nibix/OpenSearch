@@ -142,12 +142,21 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
 
     private static Map<String, String> buildPmeMetadata(ParquetModularEncryptionConfig config) {
         Map<String, String> metadata = new HashMap<>();
+        // TODO PME metadata ownership: this WriterFileSet metadata duplicates Rust Parquet
+        // key-value metadata with different keys (encrypted vs enabled, base64 wrapped key vs
+        // length markers). Production should define a single PME metadata contract. The preferred
+        // ownership is: PME footer_key_metadata bootstraps key hydration; WriterFileSet metadata
+        // carries only a commit-level summary/hash needed for planning and consistency checks.
         metadata.put("opensearch.pme.encrypted", "true");
         metadata.put("opensearch.pme.kms.instance_id", config.kmsInstanceId());
         metadata.put("opensearch.pme.kms.instance_type", config.kmsInstanceType());
         metadata.put("opensearch.pme.kms.key_arn", config.kmsKeyArn());
         metadata.put("opensearch.pme.kms.encryption_context", config.kmsEncryptionContext());
         metadata.put("opensearch.pme.wrapped_footer_key_b64", Base64.getEncoder().encodeToString(config.wrappedFooterKey()));
+        // TODO PME key derivation: do not expand WriterFileSet into a second key-management
+        // contract. V1 bootstrap data belongs in PME footer_key_metadata JSON
+        // (version/data_key_id/message_id) plus the Lucene-style index-level keyfile. Keep this
+        // metadata to a non-secret commit-level summary only, if it remains needed at all.
         return metadata;
     }
 

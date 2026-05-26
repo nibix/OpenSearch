@@ -77,6 +77,11 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
     private final Settings settings;
     private final ThreadPool threadPool;
     private final FormatChecksumStrategy checksumStrategy;
+    // TODO PME key lifecycle: this engine field keeps ParquetModularEncryptionConfig, including
+    // raw key bytes, reachable for the full shard-engine lifetime. Lucene storage encryption also
+    // caches decrypted key material, but it does so through NodeLevelKeyCache with
+    // node.store.crypto.key_expiry_interval and explicit eviction from CryptoDirectoryPlugin on
+    // index deletion. PME needs an equivalent scoped key holder with expiry/eviction/zeroing.
     private final ParquetModularEncryptionConfig encryptionConfig;
 
     /**
@@ -157,6 +162,11 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
             dataFormat.name(),
             FILE_NAME_PREFIX + "_" + writerGeneration + FILE_NAME_EXT
         );
+        // TODO PME key derivation: create a random 16-byte message_id for this Parquet file,
+        // resolve/hydrate data_key_id="default" from the Lucene-style index-level keyfile, and
+        // derive pmeFooterKey with the fixed v1 context "opensearch/parquet-pme/footer-key/v1".
+        // Pass only the derived key, JSON footer_key_metadata (version/data_key_id/message_id),
+        // and the binary AAD prefix to Rust. Do not use the physical shard path as KDF input.
         return new ParquetWriter(
             filePath.toString(),
             writerGeneration,
@@ -242,6 +252,15 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
         if (indexSettings == null) {
             return null;
         }
+        // TODO PME settings compatibility: CryptoMetadata.fromIndexSettings treats
+        // index.store.crypto.key_provider as the provider name and defaults
+        // index.store.crypto.key_provider_type to aws-kms. Lucene storage encryption uses
+        // CryptoDirectoryFactory.INDEX_KEY_PROVIDER_SETTING in CryptoDirectoryFactory#getKeyProvider
+        // as the provider type for CryptoHandlerRegistry#getCryptoKeyProviderPlugin, and that
+        // method special-cases KeyProviderType.DUMMY. A cryptofs config with key_provider=dummy
+        // can therefore resolve here as provider name "dummy" with provider type "aws-kms" unless
+        // key_provider_type is also set. Clarify and test this contract; either align PME with
+        // cryptofs settings or document and validate the CryptoMetadata convention explicitly.
         CryptoMetadata cryptoMetadata = CryptoMetadata.fromIndexSettings(indexSettings.getSettings());
         if (cryptoMetadata == null) {
             return null;
@@ -270,6 +289,10 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
 
         // Design-Entscheidung: Wir nutzen denselben KMS-Provider-Pfad wie andere verschluesselte
         // Komponenten in OpenSearch, damit Schluesselverwaltung und Auditing konsistent bleiben.
+        // TODO PME key derivation: this should hydrate or create the Lucene-style index-level
+        // keyfile instead of generating a fresh engine-lifetime data key. Per-file Parquet keys
+        // should be derived from that cached data key plus the file's random message_id, with
+        // data_key_id="default" and message_id persisted as v1 footer_key_metadata JSON.
         final DataKeyPair dataKeyPair;
         try (MasterKeyProvider keyProvider = keyProviderPlugin.createKeyProvider(cryptoMetadata)) {
             dataKeyPair = keyProvider.generateDataPair();
