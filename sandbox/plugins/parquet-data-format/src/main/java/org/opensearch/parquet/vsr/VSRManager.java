@@ -18,7 +18,7 @@ import org.opensearch.nativebridge.spi.ArrowExport;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.bridge.NativeParquetWriter;
 import org.opensearch.parquet.bridge.ParquetFileMetadata;
-import org.opensearch.parquet.bridge.ParquetModularEncryptionConfig;
+import org.opensearch.parquet.encryption.PmeFileEncryptionInputs;
 import org.opensearch.parquet.fields.ArrowFieldRegistry;
 import org.opensearch.parquet.fields.ParquetField;
 import org.opensearch.parquet.memory.ArrowBufferPool;
@@ -64,7 +64,7 @@ public class VSRManager implements AutoCloseable {
     private volatile Future<?> pendingWrite;
     private NativeParquetWriter writer;
     private final int ROTATION_TIMEOUT = 120;
-    private final ParquetModularEncryptionConfig encryptionConfig;
+    private final PmeFileEncryptionInputs encryptionInputs;
 
     /**
      * Creates a new VSRManager with asynchronous background writes (production default).
@@ -85,9 +85,9 @@ public class VSRManager implements AutoCloseable {
         ArrowBufferPool bufferPool,
         int maxRowsPerVSR,
         ThreadPool threadPool,
-        ParquetModularEncryptionConfig encryptionConfig
+        PmeFileEncryptionInputs encryptionInputs
     ) {
-        this(fileName, schema, bufferPool, maxRowsPerVSR, threadPool, true, encryptionConfig);
+        this(fileName, schema, bufferPool, maxRowsPerVSR, threadPool, true, encryptionInputs);
     }
 
     /**
@@ -119,13 +119,13 @@ public class VSRManager implements AutoCloseable {
         int maxRowsPerVSR,
         ThreadPool threadPool,
         boolean runAsync,
-        ParquetModularEncryptionConfig encryptionConfig
+        PmeFileEncryptionInputs encryptionInputs
     ) {
         this.fileName = fileName;
         this.vsrPool = new VSRPool("pool-" + fileName, schema, bufferPool, maxRowsPerVSR);
         this.threadPool = threadPool;
         this.vsrRotationThread = runAsync ? ParquetDataFormatPlugin.PARQUET_THREAD_POOL_NAME : ThreadPool.Names.SAME;
-        this.encryptionConfig = encryptionConfig;
+        this.encryptionInputs = encryptionInputs;
         this.managedVSR.set(vsrPool.getActiveVSR());
         initializeWriter();
     }
@@ -238,8 +238,7 @@ public class VSRManager implements AutoCloseable {
     private void initializeWriter() {
         ArrowSchema arrowSchema = managedVSR.get().exportSchema();
         try {
-            // Wichtige Entscheidung: PME ist writer-scope (Datei-scope). Daher beim Writer-Init uebergeben.
-            writer = new NativeParquetWriter(fileName, arrowSchema.memoryAddress(), encryptionConfig);
+            writer = new NativeParquetWriter(fileName, arrowSchema.memoryAddress(), encryptionInputs);
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize Parquet writer: " + e.getMessage(), e);
         } finally {

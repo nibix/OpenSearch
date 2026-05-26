@@ -17,17 +17,14 @@ import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.store.FormatChecksumStrategy;
 import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.ParquetFileMetadata;
-import org.opensearch.parquet.bridge.ParquetModularEncryptionConfig;
 import org.opensearch.parquet.engine.ParquetDataFormat;
+import org.opensearch.parquet.encryption.PmeFileEncryptionInputs;
 import org.opensearch.parquet.memory.ArrowBufferPool;
 import org.opensearch.parquet.vsr.VSRManager;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.Base64;
-import java.util.HashMap;
-import java.util.Map;
 
 /**
  * Parquet file writer integrating OpenSearch's {@link Writer} interface with the VSR batching layer.
@@ -49,19 +46,10 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     private final ParquetDataFormat dataFormat;
     private final VSRManager vsrManager;
     private final FormatChecksumStrategy checksumStrategy;
-    private final ParquetModularEncryptionConfig encryptionConfig;
+    private final boolean encrypted;
 
     /**
-     * Creates a new ParquetWriter.
-     *
-     * @param file output Parquet file path
-     * @param writerGeneration generation number for this writer
-     * @param dataFormat the Parquet data format instance
-     * @param schema Arrow schema for vector creation
-     * @param bufferPool shared Arrow buffer pool
-     * @param settings node settings for writer configuration
-     * @param threadPool the thread pool for background native writes
-     * @param checksumStrategy strategy to register pre-computed checksums on
+     * Creates a new ParquetWriter for an unencrypted file.
      */
     public ParquetWriter(
         String file,
@@ -77,10 +65,12 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     }
 
     /**
-     * Erstellt einen ParquetWriter mit optionaler PME-Konfiguration.
+     * Creates a new ParquetWriter with optional PME encryption.
      *
-     * <p>Design-Entscheidung: Die Verschluesselung wird einmalig beim nativen Writer-Setup
-     * gesetzt und gilt dann fuer die gesamte Datei (Writer-Generation).
+     * <p>If {@code encryptionInputs} is non-null, the footer key is zeroed immediately after
+     * the native writer is initialized inside {@link VSRManager}.
+     *
+     * @param encryptionInputs per-file PME inputs; {@code null} writes an unencrypted file
      */
     public ParquetWriter(
         String file,
@@ -91,14 +81,18 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
         Settings settings,
         ThreadPool threadPool,
         FormatChecksumStrategy checksumStrategy,
-        ParquetModularEncryptionConfig encryptionConfig
+        PmeFileEncryptionInputs encryptionInputs
     ) {
         this.file = file;
         this.writerGeneration = writerGeneration;
         this.dataFormat = dataFormat;
-        this.vsrManager = new VSRManager(file, schema, bufferPool, ParquetSettings.MAX_ROWS_PER_VSR.get(settings), threadPool, encryptionConfig);
+        this.vsrManager = new VSRManager(
+            file, schema, bufferPool,
+            ParquetSettings.MAX_ROWS_PER_VSR.get(settings),
+            threadPool, encryptionInputs
+        );
         this.checksumStrategy = checksumStrategy;
-        this.encryptionConfig = encryptionConfig;
+        this.encrypted = encryptionInputs != null;
     }
 
     @Override
@@ -116,48 +110,21 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
         Path filePath = Path.of(file);
         String fileName = filePath.getFileName().toString();
 
-        // Register the pre-computed CRC32 so the upload path can read it in O(1)
         if (checksumStrategy != null && metadata.crc32() != 0) {
             checksumStrategy.registerChecksum(fileName, metadata.crc32(), writerGeneration);
         }
 
-        WriterFileSet writerFileSet = WriterFileSet.builder()
+        WriterFileSet.Builder builder = WriterFileSet.builder()
             .directory(filePath.getParent().getFileName())
             .writerGeneration(writerGeneration)
             .addFile(fileName)
-            .addNumRows(metadata.numRows())
-            .build();
+            .addNumRows(metadata.numRows());
 
-        if (encryptionConfig != null) {
-            writerFileSet = WriterFileSet.builder()
-                .directory(filePath.getParent().getFileName())
-                .writerGeneration(writerGeneration)
-                .addFile(fileName)
-                .addNumRows(metadata.numRows())
-                .addFileMetadata(fileName, buildPmeMetadata(encryptionConfig))
-                .build();
+        if (encrypted) {
+            builder = builder.addFileMetadata(fileName, java.util.Map.of("opensearch.pme.encrypted", "true"));
         }
-        return FileInfos.builder().putWriterFileSet(dataFormat, writerFileSet).build();
-    }
 
-    private static Map<String, String> buildPmeMetadata(ParquetModularEncryptionConfig config) {
-        Map<String, String> metadata = new HashMap<>();
-        // TODO PME metadata ownership: this WriterFileSet metadata duplicates Rust Parquet
-        // key-value metadata with different keys (encrypted vs enabled, base64 wrapped key vs
-        // length markers). Production should define a single PME metadata contract. The preferred
-        // ownership is: PME footer_key_metadata bootstraps key hydration; WriterFileSet metadata
-        // carries only a commit-level summary/hash needed for planning and consistency checks.
-        metadata.put("opensearch.pme.encrypted", "true");
-        metadata.put("opensearch.pme.kms.instance_id", config.kmsInstanceId());
-        metadata.put("opensearch.pme.kms.instance_type", config.kmsInstanceType());
-        metadata.put("opensearch.pme.kms.key_arn", config.kmsKeyArn());
-        metadata.put("opensearch.pme.kms.encryption_context", config.kmsEncryptionContext());
-        metadata.put("opensearch.pme.wrapped_footer_key_b64", Base64.getEncoder().encodeToString(config.wrappedFooterKey()));
-        // TODO PME key derivation: do not expand WriterFileSet into a second key-management
-        // contract. V1 bootstrap data belongs in PME footer_key_metadata JSON
-        // (version/data_key_id/message_id) plus the Lucene-style index-level keyfile. Keep this
-        // metadata to a non-secret commit-level summary only, if it remains needed at all.
-        return metadata;
+        return FileInfos.builder().putWriterFileSet(dataFormat, builder.build()).build();
     }
 
     @Override
@@ -185,5 +152,4 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     public void close() throws IOException {
         vsrManager.close();
     }
-
 }

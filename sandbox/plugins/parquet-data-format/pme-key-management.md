@@ -409,33 +409,49 @@ serialization details, or ad hoc string concatenation.
 - Fail closed for unknown versions, missing data key metadata, malformed file
   metadata, or derivation mismatches.
 
-## Implementation Changes
+## Implementation (v1 — implemented)
 
-Java:
+### Java (`org.opensearch.parquet.encryption` package)
 
-- Replace engine-lifetime raw `ParquetModularEncryptionConfig` with a data key
-  resolver/cache.
-- Add a small v1 PME key metadata serializer/parser.
-- Use the Lucene-style index-level `keyfile` for durable wrapped data key
-  storage.
-- Derive per-file PME keys at writer creation.
-- Hydrate the data key on read from `data_key_id`.
+| Class | Role |
+|---|---|
+| `PmeFileKeyMetadata` | v1 JSON serializer/parser for `FileCryptoMetaData.key_metadata` |
+| `PmeKeyDerivation` | Two-step HMAC-SHA384 key derivation and binary AAD prefix builder |
+| `PmeDataKey` | 32-byte key holder with best-effort `zero()` on eviction |
+| `PmeDataKeyCache` | Node-level singleton `ConcurrentHashMap` cache; `initialize()` called from `ParquetDataFormatPlugin.createComponents()` |
+| `PmeKeyfileManager` | Atomic `CREATE_NEW` index-level keyfile creation/read; multiple shards race, loser reads winner's file |
+| `PmeFileEncryptionInputs` | Per-file bundle of derived footer key + key metadata JSON + AAD prefix; `zero()` called after native writer init |
+| `PmeContext` | Per-engine facade; `create(IndexSettings, indexDataPath)` → pre-warms cache; `createFileEncryptionInputs()` on write path; `resolveFooterKey(json)` on read path; `evict()` on engine close |
 
-Rust:
+Key decisions:
 
-- Accept the derived PME footer key, serialized v1 key metadata JSON bytes, and
-  AAD prefix bytes on the write path.
-- Store the metadata with `with_footer_key_metadata(...)`.
-- Configure the AAD prefix with `with_aad_prefix(...)`.
-- Reader bootstrap API shape is out of scope for this document.
+- `MasterKeyProvider` is opened via try-with-resources per cache miss (KMS call),
+  not held open for the engine lifetime.
+- Index-level keyfile is at `<index-data-dir>/keyfile` (two levels above
+  `shardPath.getDataPath()`).
+- `ParquetModularEncryptionConfig` is deprecated and no longer used.
 
-Tests:
+### Rust (`parquet_create_writer` simplified signature)
 
-- restart reads old encrypted files
-- many files in an index require one KMS unwrap per cold data-key cache
-- missing index-level `keyfile` fails
-- provider/KMS failures follow the Lucene-compatible key-provider path
-- malformed PME key metadata fails
-- merge writes output with `data_key_id = "default"` and new `message_id`
-- snapshot/restore preserves or rewraps the index-level `keyfile` according to
-  policy
+`parquet_create_writer(file, schema_address, footer_key, key_metadata_json, aad_prefix)`
+
+- `footer_key`: 32-byte derived key from Java (null ⇒ unencrypted)
+- `key_metadata_json`: UTF-8 JSON stored via `with_footer_key_metadata(...)`
+- `aad_prefix`: binary prefix configured via `with_aad_prefix(...)`
+
+Read functions (`parquet_get_file_metadata_decrypted`,
+`parquet_get_decrypted_num_rows`) accept the same `footer_key` + `aad_prefix`.
+
+`parquet_read_key_metadata(file, out_buf, out_buf_len, out_len_out)` reads
+`FileCryptoMetaData.key_metadata` without decryption using a hand-rolled
+Thrift compact protocol parser. Returns 1 if the file is not encrypted.
+
+### Tests (pending)
+
+- Restart reads old encrypted files.
+- Many files in one index require one KMS unwrap per cold data-key cache.
+- Missing index-level `keyfile` fails.
+- Provider/KMS failures follow the Lucene-compatible key-provider path.
+- Malformed PME key metadata fails closed.
+- `PmeFileKeyMetadata` round-trip and rejection tests.
+- `PmeKeyDerivation` derivation and AAD prefix tests.

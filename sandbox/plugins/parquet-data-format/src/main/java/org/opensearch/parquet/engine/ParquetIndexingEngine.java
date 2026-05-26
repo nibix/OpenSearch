@@ -11,12 +11,7 @@ package org.opensearch.parquet.engine;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.cluster.metadata.CryptoMetadata;
-import org.opensearch.common.crypto.DataKeyPair;
-import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
-import org.opensearch.crypto.CryptoHandlerRegistry;
-import org.opensearch.crypto.CryptoRegistryException;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
 import org.opensearch.index.engine.dataformat.Merger;
@@ -28,12 +23,12 @@ import org.opensearch.index.engine.exec.commit.IndexStoreProvider;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.store.FormatChecksumStrategy;
 import org.opensearch.index.store.PrecomputedChecksumStrategy;
-import org.opensearch.parquet.bridge.ParquetModularEncryptionConfig;
 import org.opensearch.parquet.bridge.RustBridge;
+import org.opensearch.parquet.encryption.PmeContext;
+import org.opensearch.parquet.encryption.PmeFileEncryptionInputs;
 import org.opensearch.parquet.memory.ArrowBufferPool;
 import org.opensearch.parquet.writer.ParquetDocumentInput;
 import org.opensearch.parquet.writer.ParquetWriter;
-import org.opensearch.plugins.CryptoKeyProviderPlugin;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.io.IOException;
@@ -55,19 +50,14 @@ import java.util.function.Supplier;
  *   <li>A shared {@link ArrowBufferPool} for Arrow memory allocation across all writers.</li>
  *   <li>Writer creation per writer generation, each producing a separate Parquet file.</li>
  *   <li>Native memory usage reporting (Arrow allocations + Rust-side allocations).</li>
+ *   <li>Optional PME encryption via {@link PmeContext} (one per engine, null if unencrypted).</li>
  * </ul>
- *
- * <p>Node-level {@link Settings} are passed through to each {@link ParquetWriter} at creation
- * time, where writer-specific settings (e.g., {@code parquet.max_rows_per_vsr}) are
- * extracted and applied.
  */
 public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDataFormat, ParquetDocumentInput> {
 
     private static final Logger logger = LogManager.getLogger(ParquetIndexingEngine.class);
 
-    /** Prefix for generated Parquet file names. */
     public static final String FILE_NAME_PREFIX = "_parquet_file_generation";
-    /** File extension for Parquet files. */
     public static final String FILE_NAME_EXT = ".parquet";
 
     private final ParquetDataFormat dataFormat;
@@ -77,23 +67,9 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
     private final Settings settings;
     private final ThreadPool threadPool;
     private final FormatChecksumStrategy checksumStrategy;
-    // TODO PME key lifecycle: this engine field keeps ParquetModularEncryptionConfig, including
-    // raw key bytes, reachable for the full shard-engine lifetime. Lucene storage encryption also
-    // caches decrypted key material, but it does so through NodeLevelKeyCache with
-    // node.store.crypto.key_expiry_interval and explicit eviction from CryptoDirectoryPlugin on
-    // index deletion. PME needs an equivalent scoped key holder with expiry/eviction/zeroing.
-    private final ParquetModularEncryptionConfig encryptionConfig;
+    /** Non-null when the index is configured for PME encryption; null otherwise. */
+    private final PmeContext pmeContext;
 
-    /**
-     * Creates a new ParquetIndexingEngine.
-     *
-     * @param settings          the node-level settings
-     * @param dataFormat        the Parquet data format descriptor
-     * @param shardPath         the shard path for file storage
-     * @param schemaSupplier    supplier for the Arrow schema
-     * @param indexSettings     the index-level settings
-     * @param threadPool        the thread pool for background native writes
-     */
     public ParquetIndexingEngine(
         Settings settings,
         ParquetDataFormat dataFormat,
@@ -105,21 +81,6 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
         this(settings, dataFormat, shardPath, schemaSupplier, indexSettings, threadPool, new PrecomputedChecksumStrategy());
     }
 
-    /**
-     * Creates a new ParquetIndexingEngine with an externally provided checksum strategy.
-     *
-     * <p>Use this constructor when the checksum strategy is shared with the
-     * {@link org.opensearch.index.store.DataFormatAwareStoreDirectory} so that
-     * pre-computed CRC32 values registered during write are visible to the upload path.
-     *
-     * @param settings          the node-level settings
-     * @param dataFormat        the Parquet data format descriptor
-     * @param shardPath         the shard path for file storage
-     * @param schemaSupplier    supplier for the Arrow schema
-     * @param indexSettings     the index-level settings
-     * @param threadPool        the thread pool for background native writes
-     * @param checksumStrategy  the checksum strategy to use (shared with the directory)
-     */
     public ParquetIndexingEngine(
         Settings settings,
         ParquetDataFormat dataFormat,
@@ -136,7 +97,7 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
         this.settings = settings;
         this.threadPool = threadPool;
         this.checksumStrategy = checksumStrategy;
-        this.encryptionConfig = initializeEncryption(indexSettings);
+        this.pmeContext = initializePmeContext(indexSettings, shardPath);
         try {
             Files.createDirectory(shardPath.resolve("parquet"));
         } catch (FileAlreadyExistsException ex) {
@@ -146,10 +107,6 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
         }
     }
 
-    /**
-     * Returns the checksum strategy for this engine's Parquet files.
-     * Used by the upload path to retrieve pre-computed checksums.
-     */
     @Override
     public FormatChecksumStrategy getChecksumStrategy() {
         return checksumStrategy;
@@ -162,11 +119,14 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
             dataFormat.name(),
             FILE_NAME_PREFIX + "_" + writerGeneration + FILE_NAME_EXT
         );
-        // TODO PME key derivation: create a random 16-byte message_id for this Parquet file,
-        // resolve/hydrate data_key_id="default" from the Lucene-style index-level keyfile, and
-        // derive pmeFooterKey with the fixed v1 context "opensearch/parquet-pme/footer-key/v1".
-        // Pass only the derived key, JSON footer_key_metadata (version/data_key_id/message_id),
-        // and the binary AAD prefix to Rust. Do not use the physical shard path as KDF input.
+        PmeFileEncryptionInputs encryptionInputs = null;
+        if (pmeContext != null) {
+            try {
+                encryptionInputs = pmeContext.createFileEncryptionInputs();
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to create PME encryption inputs for " + filePath, e);
+            }
+        }
         return new ParquetWriter(
             filePath.toString(),
             writerGeneration,
@@ -176,7 +136,7 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
             settings,
             threadPool,
             checksumStrategy,
-            encryptionConfig
+            encryptionInputs
         );
     }
 
@@ -240,77 +200,32 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
     @Override
     public void close() throws IOException {
         bufferPool.close();
+        if (pmeContext != null) {
+            pmeContext.evict();
+        }
     }
 
     /**
-     * Prototypische PME-Aktivierung:
-     * - Nur wenn {@code index.store.crypto.*} gesetzt ist.
-     * - Fail-fast falls Registry/KMS nicht verfuegbar ist.
-     * - Bezieht Data Keys ueber den regulaeren KMS-Pfad (CryptoHandlerRegistry + MasterKeyProvider).
+     * Initializes the per-engine {@link PmeContext} if the index is configured for encryption.
+     * Returns {@code null} for unencrypted indices.
+     *
+     * <p>The index-level keyfile (at {@code <index-data-dir>/keyfile}) is created atomically
+     * on first call; concurrent shard engines race on {@code CREATE_NEW}, the loser reads the
+     * winner's file.
      */
-    private static ParquetModularEncryptionConfig initializeEncryption(IndexSettings indexSettings) {
+    private static PmeContext initializePmeContext(IndexSettings indexSettings, ShardPath shardPath) {
         if (indexSettings == null) {
             return null;
         }
-        // TODO PME settings compatibility: CryptoMetadata.fromIndexSettings treats
-        // index.store.crypto.key_provider as the provider name and defaults
-        // index.store.crypto.key_provider_type to aws-kms. Lucene storage encryption uses
-        // CryptoDirectoryFactory.INDEX_KEY_PROVIDER_SETTING in CryptoDirectoryFactory#getKeyProvider
-        // as the provider type for CryptoHandlerRegistry#getCryptoKeyProviderPlugin, and that
-        // method special-cases KeyProviderType.DUMMY. A cryptofs config with key_provider=dummy
-        // can therefore resolve here as provider name "dummy" with provider type "aws-kms" unless
-        // key_provider_type is also set. Clarify and test this contract; either align PME with
-        // cryptofs settings or document and validate the CryptoMetadata convention explicitly.
-        CryptoMetadata cryptoMetadata = CryptoMetadata.fromIndexSettings(indexSettings.getSettings());
-        if (cryptoMetadata == null) {
-            return null;
+        // Index-level data directory: parent of all shard directories.
+        // shardPath.getDataPath() = .../indices/{uuid}/{shardId}/index
+        //   -> .getParent() = .../indices/{uuid}/{shardId}
+        //   -> .getParent().getParent() = .../indices/{uuid}  (index-level dir)
+        Path indexDataPath = shardPath.getDataPath().getParent().getParent();
+        try {
+            return PmeContext.create(indexSettings, indexDataPath);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to initialize PME context for index " + indexSettings.getIndex().getUUID(), e);
         }
-
-        CryptoHandlerRegistry cryptoHandlerRegistry = CryptoHandlerRegistry.getInstance();
-        if (cryptoHandlerRegistry == null) {
-            throw new IllegalStateException("CryptoHandlerRegistry is not initialized");
-        }
-        if (cryptoHandlerRegistry.fetchCryptoHandler(cryptoMetadata) == null) {
-            throw new CryptoRegistryException(
-                cryptoMetadata.keyProviderName(),
-                cryptoMetadata.keyProviderType(),
-                "Crypto handler not found for parquet modular encryption"
-            );
-        }
-
-        CryptoKeyProviderPlugin keyProviderPlugin = cryptoHandlerRegistry.getCryptoKeyProviderPlugin(cryptoMetadata.keyProviderType());
-        if (keyProviderPlugin == null) {
-            throw new CryptoRegistryException(
-                cryptoMetadata.keyProviderName(),
-                cryptoMetadata.keyProviderType(),
-                "Crypto key provider plugin not found for parquet modular encryption"
-            );
-        }
-
-        // Design-Entscheidung: Wir nutzen denselben KMS-Provider-Pfad wie andere verschluesselte
-        // Komponenten in OpenSearch, damit Schluesselverwaltung und Auditing konsistent bleiben.
-        // TODO PME key derivation: this should hydrate or create the Lucene-style index-level
-        // keyfile instead of generating a fresh engine-lifetime data key. Per-file Parquet keys
-        // should be derived from that cached data key plus the file's random message_id, with
-        // data_key_id="default" and message_id persisted as v1 footer_key_metadata JSON.
-        final DataKeyPair dataKeyPair;
-        try (MasterKeyProvider keyProvider = keyProviderPlugin.createKeyProvider(cryptoMetadata)) {
-            dataKeyPair = keyProvider.generateDataPair();
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to generate parquet footer data key via KMS provider", e);
-        }
-
-        if (dataKeyPair == null || dataKeyPair.getRawKey() == null || dataKeyPair.getEncryptedKey() == null) {
-            throw new IllegalStateException("KMS provider returned an invalid data key pair for parquet modular encryption");
-        }
-
-        return new ParquetModularEncryptionConfig(
-            cryptoMetadata.keyProviderName(),
-            cryptoMetadata.keyProviderType(),
-            cryptoMetadata.getKeyArn().orElse(""),
-            cryptoMetadata.getEncryptionContext().orElse(""),
-            dataKeyPair.getRawKey(),
-            dataKeyPair.getEncryptedKey()
-        );
     }
 }
