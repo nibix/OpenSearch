@@ -11,7 +11,6 @@ package org.opensearch.parquet.encryption;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.cluster.metadata.CryptoMetadata;
-import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.index.IndexSettings;
 
 import java.io.IOException;
@@ -25,8 +24,10 @@ import java.nio.file.Path;
  * together:
  * <ul>
  *   <li>The index-level {@link CryptoMetadata} (key provider type and name).</li>
- *   <li>The index data path, which is the cache key in {@link PmeDataKeyCache} and
- *       the directory that holds the {@code keyfile}.</li>
+ *   <li>The index UUID and shard ID, which together form the cache key in
+ *       {@link PmeDataKeyCache} and mirror the shard-lifecycle eviction model of the
+ *       Lucene storage-encryption plugin.</li>
+ *   <li>The index data path, which is the directory that holds the {@code keyfile}.</li>
  * </ul>
  *
  * <p>The data key itself lives in the node-level {@link PmeDataKeyCache}; this class
@@ -34,9 +35,10 @@ import java.nio.file.Path;
  *
  * <p>Lifecycle:
  * <ol>
- *   <li>{@link #create(IndexSettings, Path)} — called once per engine at shard open time.</li>
+ *   <li>{@link #create(IndexSettings, Path, int)} — called once per engine at shard open time.</li>
  *   <li>{@link #createFileEncryptionInputs()} — called once per Parquet file to be written.</li>
- *   <li>{@link #evict()} — called when the engine is closed; zeroes cached key material.</li>
+ *   <li>{@link #evict()} — called when the engine (shard) is closed; zeroes this shard's
+ *       cached key material.</li>
  * </ol>
  */
 public final class PmeContext {
@@ -45,47 +47,53 @@ public final class PmeContext {
 
     private final CryptoMetadata cryptoMetadata;
     private final Path indexDataPath;
-    /** Cache key used in {@link PmeDataKeyCache}: the absolute index data path string. */
-    private final String cacheKey;
+    private final String indexUuid;
+    private final int shardId;
 
-    private PmeContext(CryptoMetadata cryptoMetadata, Path indexDataPath) {
+    private PmeContext(CryptoMetadata cryptoMetadata, Path indexDataPath, String indexUuid, int shardId) {
         this.cryptoMetadata = cryptoMetadata;
         this.indexDataPath = indexDataPath;
-        this.cacheKey = indexDataPath.toString();
-    }
-
-    /**
-     * Package-private factory for unit tests: accepts a pre-built {@link MasterKeyProvider}
-     * so that {@link org.opensearch.crypto.CryptoHandlerRegistry} need not be initialised.
-     */
-    static PmeContext createForTest(IndexSettings indexSettings, Path indexDataPath, MasterKeyProvider provider) throws IOException {
-        if (indexSettings == null) {
-            return null;
-        }
-        CryptoMetadata cryptoMetadata = CryptoMetadata.fromIndexSettings(indexSettings.getSettings());
-        if (cryptoMetadata == null) {
-            return null;
-        }
-        PmeContext ctx = new PmeContext(cryptoMetadata, indexDataPath);
-        PmeDataKeyCache.getOrLoad(ctx.cacheKey, () -> PmeKeyfileManager.initOrLoad(indexDataPath, provider));
-        return ctx;
+        this.indexUuid = indexUuid;
+        this.shardId = shardId;
     }
 
     /**
      * Creates a {@link PmeContext} if the index is configured for PME encryption, or
      * returns {@code null} for unencrypted indices.
      *
-     * <p>On first call for a given index, the keyfile is created via
+     * <p>On first call for a given shard, the keyfile is created via
      * {@link PmeKeyfileManager#initOrLoad} and the data key is loaded into
      * {@link PmeDataKeyCache}. Subsequent calls (from other shards of the same index)
-     * hit the cache directly.
+     * hit the cache under their own shard-keyed entry.
      *
-     * @param indexSettings the index settings; {@code null} → returns {@code null}
-     * @param indexDataPath index-level data directory (parent of shard directories)
+     * @param indexSettings  the index settings; {@code null} → returns {@code null}
+     * @param indexDataPath  index-level data directory (parent of shard directories)
+     * @param shardId        the shard ID; used as part of the cache key for shard-lifecycle eviction
      * @return context, or {@code null} if encryption is not configured
      * @throws IOException if keyfile initialisation or key loading fails
      */
-    public static PmeContext create(IndexSettings indexSettings, Path indexDataPath) throws IOException {
+    public static PmeContext create(IndexSettings indexSettings, Path indexDataPath, int shardId) throws IOException {
+        return create(indexSettings, indexDataPath, shardId, null);
+    }
+
+    /**
+     * Exposed for testing only:
+     *
+     * <p>The {@code loaderOverride} parameter is package-private for testing: pass a
+     * pre-built {@link PmeDataKeyCache.DataKeyLoader} (backed by a mock
+     * {@link org.opensearch.common.crypto.MasterKeyProvider}) to bypass
+     * {@link org.opensearch.crypto.CryptoHandlerRegistry}. Pass {@code null} for
+     * production use; the loader will then be derived from {@code indexSettings}.
+     *
+     * @param indexSettings  the index settings; {@code null} → returns {@code null}
+     * @param indexDataPath  index-level data directory (parent of shard directories)
+     * @param shardId        the shard ID; used as part of the cache key for shard-lifecycle eviction
+     * @param loaderOverride test-only key loader; {@code null} in production
+     * @return context, or {@code null} if encryption is not configured
+     * @throws IOException if keyfile initialisation or key loading fails
+     */
+    static PmeContext create(IndexSettings indexSettings, Path indexDataPath, int shardId, PmeDataKeyCache.DataKeyLoader loaderOverride)
+        throws IOException {
         if (indexSettings == null) {
             return null;
         }
@@ -93,12 +101,17 @@ public final class PmeContext {
         if (cryptoMetadata == null) {
             return null;
         }
-        PmeContext ctx = new PmeContext(cryptoMetadata, indexDataPath);
+        String indexUuid = indexSettings.getUUID();
+        PmeContext ctx = new PmeContext(cryptoMetadata, indexDataPath, indexUuid, shardId);
+        PmeDataKeyCache.DataKeyLoader loader = loaderOverride != null
+            ? loaderOverride
+            : () -> PmeKeyfileManager.initOrLoad(indexDataPath, cryptoMetadata);
         // Eagerly populate the cache so errors surface at shard-open time, not at write time.
-        PmeDataKeyCache.getOrLoad(ctx.cacheKey, () -> PmeKeyfileManager.initOrLoad(indexDataPath, cryptoMetadata));
-        logger.debug("PME context initialised for [{}]", indexDataPath);
+        PmeDataKeyCache.getInstance().getOrLoad(indexUuid, shardId, PmeFileKeyMetadata.DEFAULT_DATA_KEY_ID, loader);
+        logger.debug("PME context initialised for index [{}] shard [{}]", indexUuid, shardId);
         return ctx;
     }
+
 
     /**
      * Creates per-file PME encryption inputs for a new Parquet file.
@@ -114,19 +127,22 @@ public final class PmeContext {
      * @throws IOException if the data key cannot be loaded
      */
     public PmeFileEncryptionInputs createFileEncryptionInputs() throws IOException {
-        PmeDataKey dataKey = PmeDataKeyCache.getOrLoad(
-            cacheKey,
+        PmeDataKey dataKey = PmeDataKeyCache.getInstance().getOrLoad(
+            indexUuid,
+            shardId,
+            PmeFileKeyMetadata.DEFAULT_DATA_KEY_ID,
             () -> PmeKeyfileManager.initOrLoad(indexDataPath, cryptoMetadata)
         );
         return PmeFileEncryptionInputs.create(dataKey);
     }
 
     /**
-     * Evicts this index's data key from the node-level cache, zeroing key material.
+     * Evicts this shard's data key from the node-level cache, zeroing key material.
      * Must be called when the engine is closed (i.e. from {@code ParquetIndexingEngine#close}).
+     * Other shards of the same index that are still open retain their own cache entries.
      */
     public void evict() {
-        PmeDataKeyCache.evict(cacheKey);
-        logger.debug("PME data key evicted for [{}]", indexDataPath);
+        PmeDataKeyCache.getInstance().evict(indexUuid, shardId, PmeFileKeyMetadata.DEFAULT_DATA_KEY_ID);
+        logger.debug("PME data key evicted for index [{}] shard [{}]", indexUuid, shardId);
     }
 }

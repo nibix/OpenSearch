@@ -293,32 +293,38 @@ define a reader bootstrap API.
 
 ## Key Cache
 
-KMS decrypts should be cached by data key scope:
+KMS decrypts are cached with shard-level granularity, mirroring the Lucene
+storage-encryption plugin's `NodeLevelKeyCache` / `ShardCacheKey` design:
 
 ```text
 cache key:
   index UUID
-  data_key_id
+  shard ID
 
 cache value:
   hydrated dataKey
+
+convenience fields (not part of key identity):
+  data_key_id   — for logging
+  indexDataPath — for keyfile location on cache miss
 ```
 
-Suggested lifecycle:
+### Why shard-level, not index-level
 
-- hydrate on first read/write
-- expire with a node-level setting
-- evict on shard/index close or deletion
-- best-effort zero on eviction
-- expose hits, misses, decrypt failures, and expiry metrics
+Using `(indexUuid, shardId)` as the cache key gives precise lifecycle control:
+each shard's entry is evicted independently when the shard's engine closes, with
+no need to reference-count how many shards of the same index are still open on
+the node. This is the same trade-off the Lucene plugin makes. Multiple shards of
+the same index on the same node each decrypt the shared index-level keyfile once
+on cold cache miss and hold a separately cached copy of the same decrypted data
+key — an acceptable memory overhead for the lifecycle simplicity it provides.
 
-This keeps the KMS call count bounded:
+### Lifecycle
 
-```text
-100 files in one index using data_key_id = "default"
-  -> 1 KMS decrypt on cold cache
-  -> 100 local derivations
-```
+- hydrate on shard open (cache miss → KMS decrypt of index-level keyfile)
+- evict on shard engine close — `PmeContext.evict()` zeros key material
+- `PmeDataKeyCache.reset()` clears all entries (test / node shutdown use)
+- best-effort zero on eviction via `PmeDataKey.zero()`
 
 ## No Rotation In V1
 
@@ -418,10 +424,11 @@ serialization details, or ad hoc string concatenation.
 | `PmeFileKeyMetadata` | v1 JSON serializer/parser for `FileCryptoMetaData.key_metadata` |
 | `PmeKeyDerivation` | Two-step HMAC-SHA384 key derivation and binary AAD prefix builder |
 | `PmeDataKey` | 32-byte key holder with best-effort `zero()` on eviction |
-| `PmeDataKeyCache` | Node-level singleton `ConcurrentHashMap` cache; `initialize()` called from `ParquetDataFormatPlugin.createComponents()` |
+| `PmeCacheKey` | Immutable composite cache key `(indexUuid, shardId)`; carries `dataKeyId` and `indexDataPath` as convenience fields (not part of identity). Mirrors `ShardCacheKey` from the Lucene storage-encryption plugin. |
+| `PmeDataKeyCache` | Node-level singleton cache keyed by `PmeCacheKey`; `initialize()` called from `ParquetDataFormatPlugin.createComponents()`; shard-level eviction on engine close; `reset()` for test teardown. |
 | `PmeKeyfileManager` | Atomic `CREATE_NEW` index-level keyfile creation/read; multiple shards race, loser reads winner's file |
 | `PmeFileEncryptionInputs` | Per-file bundle of derived footer key + key metadata JSON + AAD prefix; `zero()` called after native writer init |
-| `PmeContext` | Per-engine facade; `create(IndexSettings, indexDataPath)` → pre-warms cache; `createFileEncryptionInputs()` on write path; `resolveFooterKey(json)` on read path; `evict()` on engine close |
+| `PmeContext` | Per-engine facade; `create(IndexSettings, shardId, indexDataPath)` → pre-warms shard cache entry; `createFileEncryptionInputs()` on write path; `resolveFooterKey(json)` on read path; `evict()` on engine close (zeroes this shard's entry only) |
 
 Key decisions:
 

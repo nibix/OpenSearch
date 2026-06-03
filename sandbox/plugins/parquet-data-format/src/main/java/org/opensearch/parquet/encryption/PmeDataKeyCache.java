@@ -10,17 +10,32 @@ package org.opensearch.parquet.encryption;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Node-level cache for PME index data keys.
  *
- * <p>Keyed by the absolute index data path string (same convention as
- * {@code DatafusionReaderManager}). On eviction, the internal key material is
- * zeroed via {@link PmeDataKey#zero()}.
+ * <p>Follows the same singleton pattern as {@code NodeLevelKeyCache} in the Lucene
+ * storage-encryption plugin: a single instance is created during plugin startup via
+ * {@link #initialize()} and accessed through {@link #getInstance()}. Unlike a bare
+ * utility class with only static fields, this allows the cache to hold per-instance
+ * configuration in the future (e.g. TTL settings passed to {@code initialize}) and
+ * supports clean teardown via {@link #reset()} in tests.
  *
- * <p>The cache is a static singleton initialised by {@link #initialize()}, which is called
- * once from {@link org.opensearch.parquet.ParquetDataFormatPlugin#createComponents}.
+ * <p>Internally keyed by {@link PmeCacheKey} ({@code indexUuid} + {@code shardId}),
+ * mirroring how {@code NodeLevelKeyCache} uses {@code ShardCacheKey}. Shard-level keying
+ * gives precise lifecycle control: each shard's entry is evicted independently on shard
+ * close, with no need to reference-count how many shards of the same index are still open.
+ * Multiple shards of the same index each hold a separately cached copy of the same decrypted
+ * data key — an acceptable memory tradeoff for the lifecycle simplicity it provides. The
+ * public API accepts individual parameters and constructs the key internally, exactly as
+ * {@code NodeLevelKeyCache.get(indexUuid, shardId, indexName)} does.
+ *
+ * <p>On eviction, the internal key material is zeroed via {@link PmeDataKey#zero()}.
+ *
+ * <p>The singleton is initialised by {@link #initialize()}, which is called once from
+ * {@link org.opensearch.parquet.ParquetDataFormatPlugin#createComponents}.
  *
  * <p>TODO: The Lucene storage-encryption plugin ({@code NodeLevelKeyCache} /
  * {@code MasterKeyHealthMonitor}) adds proactive KMS health monitoring on top of a
@@ -39,46 +54,74 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 final class PmeDataKeyCache {
 
-    private static final ConcurrentHashMap<String, PmeDataKey> CACHE = new ConcurrentHashMap<>();
+    private static PmeDataKeyCache INSTANCE;
+
+    private final ConcurrentHashMap<PmeCacheKey, PmeDataKey> cache = new ConcurrentHashMap<>();
 
     private PmeDataKeyCache() {}
 
     /**
-     * Called once during plugin startup. Currently a no-op because the cache
-     * is statically initialised, but kept as an explicit lifecycle hook so
-     * future configuration (e.g. TTL) can be wired in here.
+     * Initialises the singleton instance. Must be called once during plugin startup
+     * (from {@link org.opensearch.parquet.ParquetDataFormatPlugin#createComponents})
+     * before any call to {@link #getInstance()}.
+     *
+     * <p>Idempotent: a second call has no effect if the instance already exists.
      */
-    static void initialize() {
-        // intentionally empty – static cache is already ready
+    static synchronized void initialize() {
+        if (INSTANCE == null) {
+            INSTANCE = new PmeDataKeyCache();
+        }
     }
 
     /**
-     * Returns the cached {@link PmeDataKey} for {@code cacheKey}, or loads it via
-     * {@code loader}, caches it, and returns it.
+     * Returns the singleton instance.
+     *
+     * @throws IllegalStateException if {@link #initialize()} has not been called yet
+     */
+    static PmeDataKeyCache getInstance() {
+        if (INSTANCE == null) {
+            throw new IllegalStateException("PmeDataKeyCache not initialized.");
+        }
+        return INSTANCE;
+    }
+
+    /**
+     * Returns the cached {@link PmeDataKey}, or loads it via {@code loader}, caches it,
+     * and returns it.
+     *
+     * <p>Mirrors {@code NodeLevelKeyCache.get(indexUuid, shardId, indexName)}: individual
+     * parameters are accepted and the {@link PmeCacheKey} is constructed internally.
      *
      * <p>The raw key bytes returned by {@code loader} are defensively zeroed immediately
      * after the {@link PmeDataKey} is constructed.
      *
-     * @param cacheKey index data path string
-     * @param loader   called exactly once on cache miss
+     * @param indexUuid     the index UUID
+     * @param shardId       the shard ID
+     * @param dataKeyId     the data-key identifier ({@link PmeFileKeyMetadata#DEFAULT_DATA_KEY_ID} for now)
+     * @param loader        called exactly once on cache miss; the caller is responsible for
+     *                      closing over any path or context needed to load the key material
      * @return the cached or freshly loaded data key
      * @throws IOException if the loader fails
      */
-    static PmeDataKey getOrLoad(String cacheKey, DataKeyLoader loader) throws IOException {
-        PmeDataKey existing = CACHE.get(cacheKey);
+    PmeDataKey getOrLoad(String indexUuid, int shardId, String dataKeyId, DataKeyLoader loader) throws IOException {
+        Objects.requireNonNull(indexUuid, "indexUuid must not be null");
+        Objects.requireNonNull(dataKeyId, "dataKeyId must not be null");
+
+        PmeCacheKey key = new PmeCacheKey(indexUuid, shardId, dataKeyId);
+        PmeDataKey existing = cache.get(key);
         if (existing != null) {
             return existing;
         }
-        synchronized (CACHE) {
-            existing = CACHE.get(cacheKey);
+        synchronized (cache) {
+            existing = cache.get(key);
             if (existing != null) {
                 return existing;
             }
             byte[] rawKey = loader.load();
             try {
-                PmeDataKey key = new PmeDataKey(rawKey);
-                CACHE.put(cacheKey, key);
-                return key;
+                PmeDataKey dataKey = new PmeDataKey(rawKey);
+                cache.put(key, dataKey);
+                return dataKey;
             } finally {
                 Arrays.fill(rawKey, (byte) 0);
             }
@@ -86,15 +129,41 @@ final class PmeDataKeyCache {
     }
 
     /**
-     * Removes the data key for {@code cacheKey} from the cache and zeros its
-     * internal key material.  Should be called when the engine (shard) is closed.
+     * Removes the data key from the cache and zeros its internal key material.
+     * Should be called when the shard is closed, mirroring the shard-lifecycle eviction
+     * used by {@code NodeLevelKeyCache.evict(indexUuid, shardId, indexName)}.
      *
-     * @param cacheKey index data path string
+     * @param indexUuid the index UUID
+     * @param shardId   the shard ID
+     * @param dataKeyId the data-key identifier
      */
-    static void evict(String cacheKey) {
-        PmeDataKey removed = CACHE.remove(cacheKey);
+    void evict(String indexUuid, int shardId, String dataKeyId) {
+        PmeCacheKey key = new PmeCacheKey(indexUuid, shardId, dataKeyId);
+        PmeDataKey removed = cache.remove(key);
         if (removed != null) {
             removed.zero();
+        }
+    }
+
+    /**
+     * Clears all cached keys, zeroing their key material.
+     * Primarily for testing purposes.
+     */
+    void clear() {
+        cache.forEach((k, v) -> v.zero());
+        cache.clear();
+    }
+
+    /**
+     * Resets the singleton instance completely.
+     * Primarily for testing purposes where complete cleanup between tests is needed.
+     *
+     * <p>Mirrors {@code NodeLevelKeyCache.reset()} in the Lucene storage-encryption plugin.
+     */
+    static synchronized void reset() {
+        if (INSTANCE != null) {
+            INSTANCE.clear();
+            INSTANCE = null;
         }
     }
 

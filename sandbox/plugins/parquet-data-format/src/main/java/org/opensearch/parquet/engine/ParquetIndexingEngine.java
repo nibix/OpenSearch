@@ -223,7 +223,7 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
         //   -> .getParent().getParent() = .../indices/{uuid}  (index-level dir)
         Path indexDataPath = shardPath.getDataPath().getParent().getParent();
         try {
-            return PmeContext.create(indexSettings, indexDataPath);
+            return PmeContext.create(indexSettings, indexDataPath, shardPath.getShardId().id());
         } catch (IOException e) {
             throw new RuntimeException("Failed to initialize PME context for index " + indexSettings.getIndex().getUUID(), e);
         }

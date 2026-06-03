@@ -27,10 +27,10 @@ import static org.mockito.Mockito.when;
 /**
  * Tests for {@link PmeContext}.
  *
- * <p>Because {@link PmeContext} normally calls {@link PmeKeyfileManager#initOrLoad(Path, org.opensearch.cluster.metadata.CryptoMetadata)}
- * which requires a live {@link org.opensearch.crypto.CryptoHandlerRegistry}, we use
- * {@link PmeContext#createForTest} (a package-private factory) that injects a
- * {@link MasterKeyProvider} directly, bypassing the registry.
+ * <p>Because {@link PmeContext} normally resolves the key loader via
+ * {@link org.opensearch.crypto.CryptoHandlerRegistry}, tests inject a loader directly
+ * using the package-private {@link PmeContext#create(IndexSettings, Path, int, PmeDataKeyCache.DataKeyLoader)}
+ * overload, backed by a mock {@link MasterKeyProvider}.
  */
 public class PmeContextTests extends OpenSearchTestCase {
 
@@ -42,13 +42,14 @@ public class PmeContextTests extends OpenSearchTestCase {
     @Override
     public void setUp() throws Exception {
         super.setUp();
+        PmeDataKeyCache.initialize();
         indexDataPath = createTempDir();
         provider = mockProvider(makeRawKey((byte) 0x55), new byte[] { 1, 2, 3 });
     }
 
     @Override
     public void tearDown() throws Exception {
-        PmeDataKeyCache.evict(indexDataPath.toString());
+        PmeDataKeyCache.reset();
         super.tearDown();
     }
 
@@ -79,33 +80,38 @@ public class PmeContextTests extends OpenSearchTestCase {
         return IndexSettingsModule.newIndexSettings("test-index", Settings.EMPTY);
     }
 
+    private PmeDataKeyCache.DataKeyLoader loaderFor(MasterKeyProvider p) {
+        return () -> PmeKeyfileManager.initOrLoad(indexDataPath, p);
+    }
+
     // ---- create ----
 
     public void testCreateReturnsNullForNullIndexSettings() throws IOException {
-        assertNull(PmeContext.create(null, indexDataPath));
+        assertNull(PmeContext.create(null, indexDataPath, 0, null));
     }
 
     public void testCreateReturnsNullWhenEncryptionNotConfigured() throws IOException {
-        assertNull(PmeContext.create(plainIndexSettings(), indexDataPath));
+        assertNull(PmeContext.create(plainIndexSettings(), indexDataPath, 0, null));
     }
 
-    public void testCreateForTestReturnsContextAndPopulatesCache() throws IOException {
-        PmeContext ctx = PmeContext.createForTest(encryptedIndexSettings(), indexDataPath, provider);
+    public void testCreateReturnsContextAndPopulatesCache() throws IOException {
+        IndexSettings settings = encryptedIndexSettings();
+        PmeContext ctx = PmeContext.create(settings, indexDataPath, 0, loaderFor(provider));
         assertNotNull(ctx);
 
         // Subsequent getOrLoad must be a cache hit — loader must NOT be called.
         AtomicBoolean loaderCalled = new AtomicBoolean(false);
-        PmeDataKeyCache.getOrLoad(indexDataPath.toString(), () -> {
-            loaderCalled.set(true);
-            return makeRawKey((byte) 0);
-        });
+        PmeDataKeyCache.getInstance().getOrLoad(
+            settings.getUUID(), 0, PmeFileKeyMetadata.DEFAULT_DATA_KEY_ID,
+            () -> { loaderCalled.set(true); return makeRawKey((byte) 0); }
+        );
         assertFalse("cache must already contain the key after create()", loaderCalled.get());
     }
 
     // ---- createFileEncryptionInputs ----
 
     public void testCreateFileEncryptionInputsReturns32ByteFooterKey() throws IOException {
-        PmeContext ctx = PmeContext.createForTest(encryptedIndexSettings(), indexDataPath, provider);
+        PmeContext ctx = PmeContext.create(encryptedIndexSettings(), indexDataPath, 0, loaderFor(provider));
         assertNotNull(ctx);
 
         PmeFileEncryptionInputs inputs = ctx.createFileEncryptionInputs();
@@ -123,10 +129,13 @@ public class PmeContextTests extends OpenSearchTestCase {
     // ---- evict ----
 
     public void testEvictZerosCachedKeyMaterial() throws IOException {
-        PmeContext ctx = PmeContext.createForTest(encryptedIndexSettings(), indexDataPath, provider);
+        IndexSettings settings = encryptedIndexSettings();
+        PmeContext ctx = PmeContext.create(settings, indexDataPath, 0, loaderFor(provider));
         assertNotNull(ctx);
 
-        PmeDataKey keyBefore = PmeDataKeyCache.getOrLoad(indexDataPath.toString(), () -> makeRawKey((byte) 0));
+        PmeDataKey keyBefore = PmeDataKeyCache.getInstance().getOrLoad(
+            settings.getUUID(), 0, PmeFileKeyMetadata.DEFAULT_DATA_KEY_ID, loaderFor(provider)
+        );
         ctx.evict();
 
         byte[] afterEviction = keyBefore.bytes();
@@ -138,12 +147,12 @@ public class PmeContextTests extends OpenSearchTestCase {
     }
 
     public void testEvictThenCreateReInitializesContext() throws IOException {
-        PmeContext ctx = PmeContext.createForTest(encryptedIndexSettings(), indexDataPath, provider);
+        PmeContext ctx = PmeContext.create(encryptedIndexSettings(), indexDataPath, 0, loaderFor(provider));
         assertNotNull(ctx);
         ctx.evict();
 
         MasterKeyProvider provider2 = mockProvider(makeRawKey((byte) 0x66), new byte[] { 9 });
-        PmeContext ctx2 = PmeContext.createForTest(encryptedIndexSettings(), indexDataPath, provider2);
+        PmeContext ctx2 = PmeContext.create(encryptedIndexSettings(), indexDataPath, 0, loaderFor(provider2));
         assertNotNull(ctx2);
 
         PmeFileEncryptionInputs inputs = ctx2.createFileEncryptionInputs();
@@ -151,4 +160,3 @@ public class PmeContextTests extends OpenSearchTestCase {
         inputs.zero();
     }
 }
-

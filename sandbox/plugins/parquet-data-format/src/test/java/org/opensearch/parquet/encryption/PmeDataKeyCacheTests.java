@@ -17,12 +17,20 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class PmeDataKeyCacheTests extends OpenSearchTestCase {
 
     private static final int KEY_LEN = PmeKeyDerivation.DATA_KEY_BYTES;
+    private static final String INDEX_UUID = "test-index-uuid";
+    private static final String DATA_KEY_ID = PmeFileKeyMetadata.DEFAULT_DATA_KEY_ID;
+    private static final int SHARD_A = 0;
+    private static final int SHARD_B = 1;
+
+    @Override
+    public void setUp() throws Exception {
+        super.setUp();
+        PmeDataKeyCache.initialize();
+    }
 
     @Override
     public void tearDown() throws Exception {
-        // Evict any keys inserted by the test so the static cache doesn't leak.
-        PmeDataKeyCache.evict("test-key-a");
-        PmeDataKeyCache.evict("test-key-b");
+        PmeDataKeyCache.reset();
         super.tearDown();
     }
 
@@ -32,9 +40,8 @@ public class PmeDataKeyCacheTests extends OpenSearchTestCase {
         byte[] rawKey = new byte[KEY_LEN];
         Arrays.fill(rawKey, (byte) 7);
 
-        PmeDataKey result = PmeDataKeyCache.getOrLoad("test-key-a", () -> rawKey.clone());
+        PmeDataKey result = PmeDataKeyCache.getInstance().getOrLoad(INDEX_UUID, SHARD_A, DATA_KEY_ID, () -> rawKey.clone());
 
-        // The returned key should contain the same bytes.
         byte[] got = result.bytes();
         try {
             assertArrayEquals(rawKey, got);
@@ -47,12 +54,12 @@ public class PmeDataKeyCacheTests extends OpenSearchTestCase {
         AtomicInteger loaderCalls = new AtomicInteger(0);
         byte[] rawKey = new byte[KEY_LEN];
 
-        PmeDataKey first = PmeDataKeyCache.getOrLoad("test-key-a", () -> {
+        PmeDataKey first = PmeDataKeyCache.getInstance().getOrLoad(INDEX_UUID, SHARD_A, DATA_KEY_ID, () -> {
             loaderCalls.incrementAndGet();
             return rawKey.clone();
         });
 
-        PmeDataKey second = PmeDataKeyCache.getOrLoad("test-key-a", () -> {
+        PmeDataKey second = PmeDataKeyCache.getInstance().getOrLoad(INDEX_UUID, SHARD_A, DATA_KEY_ID, () -> {
             loaderCalls.incrementAndGet();
             return rawKey.clone();
         });
@@ -62,19 +69,18 @@ public class PmeDataKeyCacheTests extends OpenSearchTestCase {
     }
 
     public void testGetOrLoadZerosRawKeyAfterConstruction() throws IOException {
-        // We pass in a sentinel array; after getOrLoad the cache must have zeroed it.
         byte[] sentinel = new byte[KEY_LEN];
         Arrays.fill(sentinel, (byte) 0x55);
         byte[] copy = sentinel.clone();
 
-        PmeDataKeyCache.getOrLoad("test-key-a", () -> sentinel);
+        PmeDataKeyCache.getInstance().getOrLoad(INDEX_UUID, SHARD_A, DATA_KEY_ID, () -> sentinel);
 
-        // sentinel should be zeroed by the cache.
         byte[] zeros = new byte[KEY_LEN];
         assertArrayEquals("loader array must be zeroed after caching", zeros, sentinel);
 
-        // But the cached key should still hold the original bytes.
-        PmeDataKey cached = PmeDataKeyCache.getOrLoad("test-key-a", () -> { throw new IOException("should not be called"); });
+        PmeDataKey cached = PmeDataKeyCache.getInstance().getOrLoad(
+            INDEX_UUID, SHARD_A, DATA_KEY_ID, () -> { throw new IOException("should not be called"); }
+        );
         byte[] got = cached.bytes();
         try {
             assertArrayEquals(copy, got);
@@ -89,21 +95,18 @@ public class PmeDataKeyCacheTests extends OpenSearchTestCase {
         byte[] rawKey = new byte[KEY_LEN];
         Arrays.fill(rawKey, (byte) 42);
 
-        PmeDataKey inserted = PmeDataKeyCache.getOrLoad("test-key-a", () -> rawKey.clone());
-        PmeDataKeyCache.evict("test-key-a");
+        PmeDataKey inserted = PmeDataKeyCache.getInstance().getOrLoad(INDEX_UUID, SHARD_A, DATA_KEY_ID, () -> rawKey.clone());
+        PmeDataKeyCache.getInstance().evict(INDEX_UUID, SHARD_A, DATA_KEY_ID);
 
-        // After eviction the internal bytes should be zeroed.
         byte[] afterEviction = inserted.bytes();
         try {
-            byte[] zeros = new byte[KEY_LEN];
-            assertArrayEquals("evicted key must be zeroed", zeros, afterEviction);
+            assertArrayEquals("evicted key must be zeroed", new byte[KEY_LEN], afterEviction);
         } finally {
             Arrays.fill(afterEviction, (byte) 0);
         }
 
-        // A subsequent getOrLoad should invoke the loader again.
         AtomicInteger reloadCount = new AtomicInteger(0);
-        PmeDataKeyCache.getOrLoad("test-key-a", () -> {
+        PmeDataKeyCache.getInstance().getOrLoad(INDEX_UUID, SHARD_A, DATA_KEY_ID, () -> {
             reloadCount.incrementAndGet();
             return rawKey.clone();
         });
@@ -111,20 +114,19 @@ public class PmeDataKeyCacheTests extends OpenSearchTestCase {
     }
 
     public void testEvictNonExistentKeyIsNoOp() {
-        // Must not throw.
-        PmeDataKeyCache.evict("does-not-exist");
+        PmeDataKeyCache.getInstance().evict(INDEX_UUID, SHARD_A, DATA_KEY_ID);
     }
 
-    // ---- isolation ----
+    // ---- shard isolation ----
 
-    public void testDifferentCacheKeysAreIndependent() throws IOException {
+    public void testDifferentShardsHaveIndependentEntries() throws IOException {
         byte[] keyA = new byte[KEY_LEN];
         Arrays.fill(keyA, (byte) 1);
         byte[] keyB = new byte[KEY_LEN];
         Arrays.fill(keyB, (byte) 2);
 
-        PmeDataKey a = PmeDataKeyCache.getOrLoad("test-key-a", () -> keyA.clone());
-        PmeDataKey b = PmeDataKeyCache.getOrLoad("test-key-b", () -> keyB.clone());
+        PmeDataKey a = PmeDataKeyCache.getInstance().getOrLoad(INDEX_UUID, SHARD_A, DATA_KEY_ID, () -> keyA.clone());
+        PmeDataKey b = PmeDataKeyCache.getInstance().getOrLoad(INDEX_UUID, SHARD_B, DATA_KEY_ID, () -> keyB.clone());
 
         assertNotSame(a, b);
 
@@ -138,11 +140,10 @@ public class PmeDataKeyCacheTests extends OpenSearchTestCase {
             Arrays.fill(gotB, (byte) 0);
         }
 
-        // Evicting A must not affect B.
-        PmeDataKeyCache.evict("test-key-a");
+        PmeDataKeyCache.getInstance().evict(INDEX_UUID, SHARD_A, DATA_KEY_ID);
         byte[] bAfter = b.bytes();
         try {
-            assertArrayEquals("evicting A must not zero B", keyB, bAfter);
+            assertArrayEquals("evicting shard A must not zero shard B", keyB, bAfter);
         } finally {
             Arrays.fill(bAfter, (byte) 0);
         }
