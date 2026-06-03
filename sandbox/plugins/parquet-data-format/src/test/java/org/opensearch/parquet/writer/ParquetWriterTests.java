@@ -17,8 +17,9 @@ import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
-import org.opensearch.parquet.bridge.ParquetModularEncryptionConfig;
 import org.opensearch.parquet.bridge.RustBridge;
+import org.opensearch.parquet.encryption.PmeFileEncryptionInputs;
+import org.opensearch.parquet.encryption.PmeKeyDerivation;
 import org.opensearch.parquet.engine.ParquetDataFormat;
 import org.opensearch.parquet.fields.ArrowFieldRegistry;
 import org.opensearch.parquet.fields.ParquetField;
@@ -30,7 +31,6 @@ import org.opensearch.threadpool.ThreadPool;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -189,15 +189,14 @@ public class ParquetWriterTests extends OpenSearchTestCase {
 
     public void testFlushPersistsPerFilePmeMetadata() throws Exception {
         String filePath = createTempDir().resolve("encrypted.parquet").toString();
-        byte[] wrappedFooterKey = randomByteArrayOfLength(32);
-        ParquetModularEncryptionConfig encryptionConfig = new ParquetModularEncryptionConfig(
-            "kms-instance-1",
-            "aws-kms",
-            "arn:aws:kms:us-east-1:111111111111:key/test",
-            "ctx=test",
-            randomByteArrayOfLength(16),
-            wrappedFooterKey
-        );
+
+        // Build encryption inputs directly from known key material.
+        byte[] dataKey = randomByteArrayOfLength(32);
+        byte[] messageId = randomByteArrayOfLength(16);
+        byte[] footerKey = PmeKeyDerivation.deriveFooterKey(dataKey, messageId);
+        byte[] aadPrefix = PmeKeyDerivation.buildAadPrefix(messageId);
+        PmeFileEncryptionInputs encryptionConfig = PmeFileEncryptionInputs.forDecryption(footerKey, aadPrefix);
+
         ParquetWriter writer = new ParquetWriter(
             filePath,
             1L,
@@ -222,10 +221,6 @@ public class ParquetWriterTests extends OpenSearchTestCase {
         Map<String, String> metadata = fileInfos.writerFilesMap().values().iterator().next().metadataForFile(fileName);
 
         assertEquals("true", metadata.get("opensearch.pme.encrypted"));
-        assertEquals("kms-instance-1", metadata.get("opensearch.pme.kms.instance_id"));
-        assertEquals("aws-kms", metadata.get("opensearch.pme.kms.instance_type"));
-        assertEquals("ctx=test", metadata.get("opensearch.pme.kms.encryption_context"));
-        assertEquals(Base64.getEncoder().encodeToString(wrappedFooterKey), metadata.get("opensearch.pme.wrapped_footer_key_b64"));
     }
 
     private Schema buildSchema(List<MappedFieldType> fieldTypes) {

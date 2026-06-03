@@ -235,14 +235,17 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
 
     public void testGetFileMetadataForEncryptedFileRequiresDecryptionConfig() throws Exception {
         String filePath = createTempDir().resolve("encrypted-read.parquet").toString();
-        ParquetModularEncryptionConfig encryptionConfig = new ParquetModularEncryptionConfig(
-            "kms-instance",
-            "aws-kms",
-            "arn:aws:kms:region:acct:key/test",
-            "tenant=t1",
-            new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 },
-            new byte[] { 4, 3, 2, 1 }
-        );
+
+        // Build a fixed data key and message_id so we can reconstruct read inputs after write.
+        byte[] dataKey = new byte[32];
+        byte[] messageId = new byte[16];
+        random().nextBytes(dataKey);
+        random().nextBytes(messageId);
+
+        byte[] footerKey = org.opensearch.parquet.encryption.PmeKeyDerivation.deriveFooterKey(dataKey, messageId);
+        byte[] aadPrefix = org.opensearch.parquet.encryption.PmeKeyDerivation.buildAadPrefix(messageId);
+        org.opensearch.parquet.encryption.PmeFileEncryptionInputs encryptionConfig =
+            org.opensearch.parquet.encryption.PmeFileEncryptionInputs.forDecryption(footerKey, aadPrefix);
 
         NativeParquetWriter writer;
         try (ArrowExport export = exportSchema()) {
@@ -260,14 +263,12 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
         long decryptedRows = RustBridge.getDecryptedNumRows(filePath, encryptionConfig);
         assertEquals(1L, decryptedRows);
 
-        ParquetModularEncryptionConfig wrongKeyConfig = new ParquetModularEncryptionConfig(
-            "kms-instance",
-            "aws-kms",
-            "arn:aws:kms:region:acct:key/test",
-            "tenant=t1",
-            new byte[] { 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9 },
-            new byte[] { 4, 3, 2, 1 }
-        );
+        // Wrong key: same messageId but different dataKey → different footerKey → decryption fails.
+        byte[] wrongDataKey = new byte[32];
+        random().nextBytes(wrongDataKey);
+        byte[] wrongFooterKey = org.opensearch.parquet.encryption.PmeKeyDerivation.deriveFooterKey(wrongDataKey, messageId);
+        org.opensearch.parquet.encryption.PmeFileEncryptionInputs wrongKeyConfig =
+            org.opensearch.parquet.encryption.PmeFileEncryptionInputs.forDecryption(wrongFooterKey, aadPrefix);
         expectThrows(IOException.class, () -> RustBridge.getDecryptedNumRows(filePath, wrongKeyConfig));
     }
 

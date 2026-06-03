@@ -11,7 +11,9 @@ package org.opensearch.parquet.encryption;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.cluster.metadata.CryptoMetadata;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.parquet.ParquetSettings;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -97,10 +99,16 @@ public final class PmeContext {
         if (indexSettings == null) {
             return null;
         }
-        CryptoMetadata cryptoMetadata = CryptoMetadata.fromIndexSettings(indexSettings.getSettings());
-        if (cryptoMetadata == null) {
+        // Build CryptoMetadata from Parquet-specific settings (index.store.parquet.crypto.*)
+        // instead of calling CryptoMetadata.fromIndexSettings(), which reads the Lucene-plugin
+        // keys (index.store.crypto.*) that we cannot register to avoid a setting-name collision.
+        Settings raw = indexSettings.getSettings();
+        String keyProviderName = ParquetSettings.CRYPTO_KEY_PROVIDER.get(raw);
+        if (keyProviderName == null || keyProviderName.isEmpty()) {
             return null;
         }
+        String keyProviderType = ParquetSettings.CRYPTO_KEY_PROVIDER_TYPE.get(raw);
+        CryptoMetadata cryptoMetadata = new CryptoMetadata(keyProviderName, keyProviderType, Settings.EMPTY);
         String indexUuid = indexSettings.getUUID();
         PmeContext ctx = new PmeContext(cryptoMetadata, indexDataPath, indexUuid, shardId);
         PmeDataKeyCache.DataKeyLoader loader = loaderOverride != null

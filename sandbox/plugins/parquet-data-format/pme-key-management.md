@@ -140,6 +140,30 @@ the same OpenSearch/Lucene storage-encryption provider model that supplies
 `MasterKeyProvider`. The `keyfile` stores only provider-wrapped data key bytes;
 provider selection and provider settings are not duplicated in the PME footer.
 
+#### Parquet index settings vs. Lucene index settings
+
+The Lucene storage-encryption plugin registers a single index setting:
+
+```
+index.store.crypto.key_provider   →  provider name only
+```
+
+The provider *type* is resolved out-of-band from the `CryptoHandlerRegistry` by
+looking up the registered `CryptoKeyProviderPlugin` for that name.
+
+Parquet PME uses a separate, Parquet-specific prefix to avoid a setting-name
+collision (two plugins cannot register an `IndexScope` setting under the same
+key):
+
+```
+index.store.parquet.crypto.key_provider       →  provider name
+index.store.parquet.crypto.key_provider_type  →  provider type (e.g. "mock-pme")
+```
+
+The `key_provider_type` field was added so that the correct
+`CryptoKeyProviderPlugin` can be selected directly from the index settings
+without an additional registry lookup.
+
 Index setting semantics are intentionally out of scope for this document.
 
 ## V1 Derivation Algorithm
@@ -403,6 +427,32 @@ Do not include:
 
 The AAD prefix is binary, not JSON. Do not rely on map iteration order, JSON
 serialization details, or ad hoc string concatenation.
+
+## Open Issues
+
+### Setting-name collision between Lucene and Parquet crypto plugins
+
+The opensearch-storage-encryption (Lucene) plugin registers
+`index.store.crypto.key_provider` as an `IndexScope + NodeScope + InternalIndex`
+setting. OpenSearch forbids two plugins from registering an `IndexScope` setting
+under the same key, so the Parquet plugin uses its own namespace:
+
+```
+index.store.parquet.crypto.key_provider
+index.store.parquet.crypto.key_provider_type
+```
+
+This is a temporary workaround. The goal is a unified solution where both the
+Lucene and Parquet plugins share a single `index.store.crypto.key_provider`
+setting, either through:
+
+- a core-registered prefix setting that both plugins can read without
+  re-registering, or
+- a merged crypto-metadata registry in the server that exposes the provider
+  name/type to any plugin that needs it.
+
+Until that mechanism exists, the Parquet-specific prefix avoids the collision at
+the cost of a separate (but semantically identical) index setting key.
 
 ## Security Notes
 

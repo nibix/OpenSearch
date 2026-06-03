@@ -39,7 +39,7 @@ import java.util.Arrays;
  * <p>The keyfile stores the {@link MasterKeyProvider}-wrapped (encrypted) form of the
  * 32-byte AES-GCM data key used to derive per-file footer keys.
  *
- * <h3>Write path (first shard to open on this node for a given index)</h3>
+ * <h2>Write path (first shard to open on this node for a given index)</h2>
  * <ol>
  *   <li>Call {@link MasterKeyProvider#generateDataPair()} to obtain the raw + encrypted key.</li>
  *   <li>Write the encrypted key to {@code keyfile.tmp} on the plain filesystem, then
@@ -52,7 +52,7 @@ import java.util.Arrays;
  * We use tmp+rename here because we write directly to the filesystem without a directory
  * abstraction.
  *
- * <h3>Read path (keyfile already exists)</h3>
+ * <h2>Read path (keyfile already exists)</h2>
  * <ol>
  *   <li>Read encrypted bytes from {@code keyfile}.</li>
  *   <li>Decrypt with {@link MasterKeyProvider#decryptKey(byte[])}.</li>

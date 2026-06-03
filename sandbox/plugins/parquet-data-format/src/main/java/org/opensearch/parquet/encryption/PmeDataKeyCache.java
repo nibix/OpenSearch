@@ -52,7 +52,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>Automatic block removal and shard-retry trigger upon KMS recovery.</li>
  * </ul>
  */
-final class PmeDataKeyCache {
+public final class PmeDataKeyCache {
 
     private static PmeDataKeyCache INSTANCE;
 
@@ -67,7 +67,7 @@ final class PmeDataKeyCache {
      *
      * <p>Idempotent: a second call has no effect if the instance already exists.
      */
-    static synchronized void initialize() {
+    public static synchronized void initialize() {
         if (INSTANCE == null) {
             INSTANCE = new PmeDataKeyCache();
         }

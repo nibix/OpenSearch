@@ -70,8 +70,8 @@ public class PmeContextTests extends OpenSearchTestCase {
 
     private static IndexSettings encryptedIndexSettings() {
         Settings settings = Settings.builder()
-            .put("index.store.crypto.key_provider", "test-provider")
-            .put("index.store.crypto.key_provider_type", "mock")
+            .put("index.store.parquet.crypto.key_provider", "test-provider")
+            .put("index.store.parquet.crypto.key_provider_type", "mock")
             .build();
         return IndexSettingsModule.newIndexSettings("test-index", settings);
     }
