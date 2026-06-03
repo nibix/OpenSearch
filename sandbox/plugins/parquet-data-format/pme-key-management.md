@@ -310,8 +310,10 @@ define a reader bootstrap API.
 
 6. Derive the file key using the v1 algorithm.
 
-7. Pass the derived `pmeFooterKey` to parquet-rs
-   `FileDecryptionProperties`.
+7. Pass the derived `pmeFooterKey` to the native Rust/DataFusion layer
+   (`FileDecryptionProperties`). Java does not hold a `resolveFooterKey` API
+   in `PmeContext` — key material for the read path is supplied to DataFusion
+   when the reader is initialised.
 
 8. Best-effort zero temporary key material, or release it through a scoped cache.
 
@@ -321,16 +323,12 @@ KMS decrypts are cached with shard-level granularity, mirroring the Lucene
 storage-encryption plugin's `NodeLevelKeyCache` / `ShardCacheKey` design:
 
 ```text
-cache key:
+cache key  (PmeCacheKey):
   index UUID
   shard ID
 
 cache value:
-  hydrated dataKey
-
-convenience fields (not part of key identity):
-  data_key_id   — for logging
-  indexDataPath — for keyfile location on cache miss
+  hydrated dataKey (PmeDataKey)
 ```
 
 ### Why shard-level, not index-level
@@ -474,11 +472,11 @@ the cost of a separate (but semantically identical) index setting key.
 | `PmeFileKeyMetadata` | v1 JSON serializer/parser for `FileCryptoMetaData.key_metadata` |
 | `PmeKeyDerivation` | Two-step HMAC-SHA384 key derivation and binary AAD prefix builder |
 | `PmeDataKey` | 32-byte key holder with best-effort `zero()` on eviction |
-| `PmeCacheKey` | Immutable composite cache key `(indexUuid, shardId)`; carries `dataKeyId` and `indexDataPath` as convenience fields (not part of identity). Mirrors `ShardCacheKey` from the Lucene storage-encryption plugin. |
+| `PmeCacheKey` | Immutable composite cache key `(indexUuid, shardId)`;  Mirrors `ShardCacheKey` from the Lucene storage-encryption plugin. |
 | `PmeDataKeyCache` | Node-level singleton cache keyed by `PmeCacheKey`; `initialize()` called from `ParquetDataFormatPlugin.createComponents()`; shard-level eviction on engine close; `reset()` for test teardown. |
 | `PmeKeyfileManager` | Atomic `CREATE_NEW` index-level keyfile creation/read; multiple shards race, loser reads winner's file |
 | `PmeFileEncryptionInputs` | Per-file bundle of derived footer key + key metadata JSON + AAD prefix; `zero()` called after native writer init |
-| `PmeContext` | Per-engine facade; `create(IndexSettings, shardId, indexDataPath)` → pre-warms shard cache entry; `createFileEncryptionInputs()` on write path; `resolveFooterKey(json)` on read path; `evict()` on engine close (zeroes this shard's entry only) |
+| `PmeContext` | Per-engine facade; `create(IndexSettings, Path indexDataPath, int shardId)` → pre-warms shard cache entry; `createFileEncryptionInputs()` on write path; `evict()` on engine close (zeroes this shard's entry only). Read-path key resolution runs through the native Rust/DataFusion layer, not through `PmeContext`. |
 
 Key decisions:
 
