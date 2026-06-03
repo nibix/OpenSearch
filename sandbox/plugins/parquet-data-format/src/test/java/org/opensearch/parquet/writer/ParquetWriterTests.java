@@ -68,13 +68,15 @@ public class ParquetWriterTests extends OpenSearchTestCase {
     @Override
     public void tearDown() throws Exception {
         terminate(threadPool);
-        bufferPool.close();
+        if (bufferPool != null) {
+            bufferPool.close();
+        }
         super.tearDown();
     }
 
     public void testAddDocReturnsSuccess() throws Exception {
         String filePath = createTempDir().resolve("success.parquet").toString();
-        ParquetWriter writer = new ParquetWriter(
+        try (ParquetWriter writer = new ParquetWriter(
             filePath,
             1L,
             new ParquetDataFormat(),
@@ -83,21 +85,21 @@ public class ParquetWriterTests extends OpenSearchTestCase {
             Settings.EMPTY,
             threadPool,
             null
-        );
-
-        ParquetDocumentInput doc = new ParquetDocumentInput();
-        doc.addField(idField, 1);
-        doc.addField(nameField, "alice");
-        doc.addField(scoreField, 100L);
-        WriteResult result = writer.addDoc(doc);
-        assertTrue(result instanceof WriteResult.Success);
-        doc.close();
-        writer.flush();
+        )) {
+            ParquetDocumentInput doc = new ParquetDocumentInput();
+            doc.addField(idField, 1);
+            doc.addField(nameField, "alice");
+            doc.addField(scoreField, 100L);
+            WriteResult result = writer.addDoc(doc);
+            assertTrue(result instanceof WriteResult.Success);
+            doc.close();
+            writer.flush();
+        }
     }
 
     public void testSingleDocumentFlush() throws Exception {
         String filePath = createTempDir().resolve("single.parquet").toString();
-        ParquetWriter writer = new ParquetWriter(
+        try (ParquetWriter writer = new ParquetWriter(
             filePath,
             1L,
             new ParquetDataFormat(),
@@ -106,22 +108,22 @@ public class ParquetWriterTests extends OpenSearchTestCase {
             Settings.EMPTY,
             threadPool,
             null
-        );
+        )) {
+            ParquetDocumentInput doc = new ParquetDocumentInput();
+            doc.addField(idField, 42);
+            doc.addField(nameField, "bob");
+            doc.addField(scoreField, 500L);
+            writer.addDoc(doc);
+            doc.close();
 
-        ParquetDocumentInput doc = new ParquetDocumentInput();
-        doc.addField(idField, 42);
-        doc.addField(nameField, "bob");
-        doc.addField(scoreField, 500L);
-        writer.addDoc(doc);
-        doc.close();
-
-        writer.flush();
-        assertEquals(1, RustBridge.getFileMetadata(filePath).numRows());
+            writer.flush();
+            assertEquals(1, RustBridge.getFileMetadata(filePath).numRows());
+        }
     }
 
     public void testMultipleDocumentsFlush() throws Exception {
         String filePath = createTempDir().resolve("multi.parquet").toString();
-        ParquetWriter writer = new ParquetWriter(
+        try (ParquetWriter writer = new ParquetWriter(
             filePath,
             1L,
             new ParquetDataFormat(),
@@ -130,26 +132,26 @@ public class ParquetWriterTests extends OpenSearchTestCase {
             Settings.EMPTY,
             threadPool,
             null
-        );
+        )) {
+            for (int i = 0; i < 10; i++) {
+                ParquetDocumentInput doc = new ParquetDocumentInput();
+                doc.addField(idField, i);
+                doc.addField(nameField, "user_" + i);
+                doc.addField(scoreField, (long) (i * 100));
+                writer.addDoc(doc);
+                doc.close();
+            }
 
-        for (int i = 0; i < 10; i++) {
-            ParquetDocumentInput doc = new ParquetDocumentInput();
-            doc.addField(idField, i);
-            doc.addField(nameField, "user_" + i);
-            doc.addField(scoreField, (long) (i * 100));
-            writer.addDoc(doc);
-            doc.close();
+            FileInfos fileInfos = writer.flush();
+            assertNotNull(fileInfos);
+            assertTrue(Files.exists(Path.of(filePath)));
+            assertEquals(10, RustBridge.getFileMetadata(filePath).numRows());
         }
-
-        FileInfos fileInfos = writer.flush();
-        assertNotNull(fileInfos);
-        assertTrue(Files.exists(Path.of(filePath)));
-        assertEquals(10, RustBridge.getFileMetadata(filePath).numRows());
     }
 
     public void testFlushWithNoDocuments() throws Exception {
         String filePath = createTempDir().resolve("empty.parquet").toString();
-        ParquetWriter writer = new ParquetWriter(
+        try (ParquetWriter writer = new ParquetWriter(
             filePath,
             1L,
             new ParquetDataFormat(),
@@ -158,13 +160,14 @@ public class ParquetWriterTests extends OpenSearchTestCase {
             Settings.EMPTY,
             threadPool,
             null
-        );
-        assertEquals(FileInfos.empty(), writer.flush());
+        )) {
+            assertEquals(FileInfos.empty(), writer.flush());
+        }
     }
 
     public void testSyncAfterFlush() throws Exception {
         String filePath = createTempDir().resolve("sync.parquet").toString();
-        ParquetWriter writer = new ParquetWriter(
+        try (ParquetWriter writer = new ParquetWriter(
             filePath,
             1L,
             new ParquetDataFormat(),
@@ -173,18 +176,18 @@ public class ParquetWriterTests extends OpenSearchTestCase {
             Settings.EMPTY,
             threadPool,
             null
-        );
+        )) {
+            ParquetDocumentInput doc = new ParquetDocumentInput();
+            doc.addField(idField, 1);
+            doc.addField(nameField, "alice");
+            doc.addField(scoreField, 100L);
+            writer.addDoc(doc);
+            doc.close();
 
-        ParquetDocumentInput doc = new ParquetDocumentInput();
-        doc.addField(idField, 1);
-        doc.addField(nameField, "alice");
-        doc.addField(scoreField, 100L);
-        writer.addDoc(doc);
-        doc.close();
-
-        writer.flush();
-        writer.sync();
-        assertTrue(Files.exists(Path.of(filePath)));
+            writer.flush();
+            writer.sync();
+            assertTrue(Files.exists(Path.of(filePath)));
+        }
     }
 
     public void testFlushPersistsPerFilePmeMetadata() throws Exception {
@@ -197,7 +200,8 @@ public class ParquetWriterTests extends OpenSearchTestCase {
         byte[] aadPrefix = PmeKeyDerivation.buildAadPrefix(messageId);
         PmeFileEncryptionInputs encryptionConfig = PmeFileEncryptionInputs.forDecryption(footerKey, aadPrefix);
 
-        ParquetWriter writer = new ParquetWriter(
+        FileInfos fileInfos;
+        try (ParquetWriter writer = new ParquetWriter(
             filePath,
             1L,
             new ParquetDataFormat(),
@@ -207,16 +211,16 @@ public class ParquetWriterTests extends OpenSearchTestCase {
             threadPool,
             null,
             encryptionConfig
-        );
+        )) {
+            ParquetDocumentInput doc = new ParquetDocumentInput();
+            doc.addField(idField, 7);
+            doc.addField(nameField, "enc");
+            doc.addField(scoreField, 700L);
+            writer.addDoc(doc);
+            doc.close();
 
-        ParquetDocumentInput doc = new ParquetDocumentInput();
-        doc.addField(idField, 7);
-        doc.addField(nameField, "enc");
-        doc.addField(scoreField, 700L);
-        writer.addDoc(doc);
-        doc.close();
-
-        FileInfos fileInfos = writer.flush();
+            fileInfos = writer.flush();
+        }
         String fileName = Path.of(filePath).getFileName().toString();
         Map<String, String> metadata = fileInfos.writerFilesMap().values().iterator().next().metadataForFile(fileName);
 

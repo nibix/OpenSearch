@@ -227,11 +227,12 @@ public class VSRManager implements AutoCloseable {
             if (writer != null) {
                 writer.flush();
             }
-            vsrPool.close();
-            managedVSR.set(null);
         } catch (Exception e) {
             logger.error("Error during close for {}: {}", fileName, e.getMessage());
             throw new RuntimeException("Failed to close VSRManager: " + e.getMessage(), e);
+        } finally {
+            vsrPool.close();
+            managedVSR.set(null);
         }
     }
 

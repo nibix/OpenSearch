@@ -18,10 +18,12 @@ import org.opensearch.plugins.CryptoKeyProviderPlugin;
 import java.io.IOException;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
+import java.util.UUID;
 
 /**
  * Manages the index-level PME keyfile.
@@ -62,7 +64,6 @@ import java.util.Arrays;
 final class PmeKeyfileManager {
 
     static final String KEYFILE_NAME = "keyfile";
-    private static final String KEYFILE_TMP_NAME = "keyfile.tmp";
 
     private PmeKeyfileManager() {}
 
@@ -115,11 +116,16 @@ final class PmeKeyfileManager {
         byte[] rawKey = pair.getRawKey();
         validateKeyLength(rawKey, keyfilePath);
 
-        Path tmp = indexDataPath.resolve(KEYFILE_TMP_NAME);
-        Files.write(tmp, pair.getEncryptedKey(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        // Use a unique tmp name per attempt so concurrent callers don't overwrite each other's
+        // tmp file before the atomic rename. Each loser sees FileAlreadyExistsException or
+        // NoSuchFileException (if another thread already won and moved the same tmp file) and
+        // falls through to load the winner's keyfile.
+        // TODO: Research whether we can find a more coordinated way to coordinate this.
+        Path tmp = indexDataPath.resolve("keyfile.tmp." + UUID.randomUUID());
+        Files.write(tmp, pair.getEncryptedKey(), StandardOpenOption.CREATE_NEW);
         try {
             Files.move(tmp, keyfilePath, StandardCopyOption.ATOMIC_MOVE);
-        } catch (FileAlreadyExistsException e) {
+        } catch (FileAlreadyExistsException | NoSuchFileException e) {
             // Another shard won the race — use their keyfile.
             Files.deleteIfExists(tmp);
             Arrays.fill(rawKey, (byte) 0);

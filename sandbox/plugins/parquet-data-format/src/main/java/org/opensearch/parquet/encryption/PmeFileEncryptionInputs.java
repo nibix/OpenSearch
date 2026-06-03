@@ -85,7 +85,7 @@ public final class PmeFileEncryptionInputs {
     }
 
     /**
-     * Returns a defensive copy of the 32-byte derived footer key.
+     * Returns a defensive copy of the derived footer key.
      * The caller should zero the returned array after use.
      */
     public byte[] footerKey() {

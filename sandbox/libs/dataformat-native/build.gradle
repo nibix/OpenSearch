@@ -80,6 +80,8 @@ task buildRustLibrary(type: Exec) {
 
     inputs.files fileTree("${rustWorkspaceDir}/common/src")
     inputs.files fileTree("${rustWorkspaceDir}/lib/src")
+    inputs.files fileTree("${rootDir}/sandbox/plugins/analytics-backend-datafusion/rust/src")
+    inputs.files fileTree("${rootDir}/sandbox/plugins/parquet-data-format/src/main/rust/src")
     inputs.file "${rustWorkspaceDir}/Cargo.toml"
     outputs.file nativeLibFile
 }

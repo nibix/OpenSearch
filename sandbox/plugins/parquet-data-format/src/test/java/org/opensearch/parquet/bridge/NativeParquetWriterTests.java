@@ -52,7 +52,9 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
 
     @Override
     public void tearDown() throws Exception {
-        allocator.close();
+        if (allocator != null) {
+            allocator.close();
+        }
         super.tearDown();
     }
 
@@ -244,23 +246,28 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
 
         byte[] footerKey = org.opensearch.parquet.encryption.PmeKeyDerivation.deriveFooterKey(dataKey, messageId);
         byte[] aadPrefix = org.opensearch.parquet.encryption.PmeKeyDerivation.buildAadPrefix(messageId);
-        org.opensearch.parquet.encryption.PmeFileEncryptionInputs encryptionConfig =
+        // writeConfig is zeroed by NativeParquetWriter after creation; keep footerKey/aadPrefix for reads.
+        org.opensearch.parquet.encryption.PmeFileEncryptionInputs writeConfig =
             org.opensearch.parquet.encryption.PmeFileEncryptionInputs.forDecryption(footerKey, aadPrefix);
 
         NativeParquetWriter writer;
         try (ArrowExport export = exportSchema()) {
-            writer = new NativeParquetWriter(filePath, export.getSchemaAddress(), encryptionConfig);
+            writer = new NativeParquetWriter(filePath, export.getSchemaAddress(), writeConfig);
         }
         try (ArrowExport export = exportData(new int[] { 1 }, new String[] { "alice" }, new long[] { 10L })) {
             writer.write(export.getArrayAddress(), export.getSchemaAddress());
         }
         writer.flush();
 
+        // Build a fresh decryption config from the still-valid local key bytes.
+        org.opensearch.parquet.encryption.PmeFileEncryptionInputs decryptionConfig =
+            org.opensearch.parquet.encryption.PmeFileEncryptionInputs.forDecryption(footerKey, aadPrefix);
+
         expectThrows(IOException.class, () -> RustBridge.getFileMetadata(filePath));
-        ParquetFileMetadata decryptedMetadata = RustBridge.getFileMetadata(filePath, encryptionConfig);
+        ParquetFileMetadata decryptedMetadata = RustBridge.getFileMetadata(filePath, decryptionConfig);
         assertEquals(1L, decryptedMetadata.numRows());
 
-        long decryptedRows = RustBridge.getDecryptedNumRows(filePath, encryptionConfig);
+        long decryptedRows = RustBridge.getDecryptedNumRows(filePath, decryptionConfig);
         assertEquals(1L, decryptedRows);
 
         // Wrong key: same messageId but different dataKey → different footerKey → decryption fails.

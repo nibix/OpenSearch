@@ -119,7 +119,12 @@ public class PmeKeyfileManagerTests extends OpenSearchTestCase {
         }
 
         assertTrue(Files.exists(dir.resolve(PmeKeyfileManager.KEYFILE_NAME)));
-        assertFalse(Files.exists(dir.resolve("keyfile.tmp")));
+        // No stray tmp files should remain (each uses a unique UUID name).
+        long tmpCount;
+        try (java.util.stream.Stream<Path> stream = Files.list(dir)) {
+            tmpCount = stream.filter(p -> p.getFileName().toString().startsWith("keyfile.tmp.")).count();
+        }
+        assertEquals("stray tmp keyfiles should be cleaned up", 0, tmpCount);
     }
 
     // ---- validation ----

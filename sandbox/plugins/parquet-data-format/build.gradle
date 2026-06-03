@@ -27,7 +27,7 @@ dependencies {
   implementation "org.apache.arrow:arrow-c-data:${versions.arrow}"
 
   // Required by Arrow
-  implementation 'org.checkerframework:checker-qual:3.42.0'
+  implementation 'org.checkerframework:checker-qual:3.43.0'
   implementation "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
   implementation "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
   implementation "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"

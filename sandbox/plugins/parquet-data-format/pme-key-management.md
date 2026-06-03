@@ -428,6 +428,41 @@ serialization details, or ad hoc string concatenation.
 
 ## Open Issues
 
+### AES-128-GCM constraint from parquet-rs 57.x
+
+The v1 derivation algorithm in this document specifies a 32-byte (`pmeFooterKey`)
+output, implying AES-256-GCM. However, parquet-rs 57.x only supports
+**AES-128-GCM** (16-byte keys) in its encryption cipher implementation
+(`encryption/ciphers.rs` uses `ring::aead::AES_128_GCM` exclusively). Passing a
+32-byte key to `ring` returns `Unspecified`, causing every encrypted write to
+fail at runtime.
+
+As a pragmatic fix, `FOOTER_KEY_BYTES` was reduced from 32 to **16** and the
+Rust-side validation was updated to match. The derivation algorithm still runs
+two HMAC-SHA384 steps; it simply truncates `T1` to 16 bytes instead of 32:
+
+```text
+pmeFooterKey = first 16 bytes of T1
+```
+
+The Rust guard `footer_key.len() != 16` enforces this at the FFM boundary.
+
+**Impact on this document:**
+
+- Every reference to "32-byte footer key" or "AES-256" in the derivation section
+  is factually incorrect for the current implementation. The derivation algorithm
+  box should read `pmeFooterKey = first 16 bytes of T1`.
+- `PmeKeyDerivation.FOOTER_KEY_BYTES = 16` is the authoritative constant.
+- The data key (index-level keyfile) remains 32 bytes; only the **derived**
+  per-file footer key is 16 bytes.
+- `validateKeyLength` in `PmeKeyfileManager` still checks for
+  `DATA_KEY_BYTES = 32`; the footer-key length check lives in Rust.
+
+**Planned resolution:** upgrade to a version of parquet-rs (Apache Arrow/Parquet
+≥ 58.x or a fork) that exposes AES-256-GCM support, restore `FOOTER_KEY_BYTES`
+to 32, update the Rust guard, and revert the truncation. Until then AES-128-GCM
+is the operative algorithm.
+
 ### Setting-name collision between Lucene and Parquet crypto plugins
 
 The opensearch-storage-encryption (Lucene) plugin registers
@@ -501,12 +536,21 @@ Read functions (`parquet_get_file_metadata_decrypted`,
 `FileCryptoMetaData.key_metadata` without decryption using a hand-rolled
 Thrift compact protocol parser. Returns 1 if the file is not encrypted.
 
-### Tests (pending)
+### Tests
+
+Implemented unit tests (all passing):
+
+| Test class | Coverage |
+|---|---|
+| `PmeKeyfileManagerTests` | keyfile creation, load, concurrent-init race, wrong-length rejection |
+| `PmeDataKeyCacheTests` | cache miss/hit, zero-on-evict, shard isolation, reset |
+| `PmeContextTests` | create returns null for plain/null settings, cache pre-warm, evict zeros key, evict+re-create |
+| `PmeFileKeyMetadataTests` | `forNewFile` validation + defensive copy, `toJsonBytes` compact form, `parse` round-trip + all rejection cases (unknown version, wrong data_key_id, missing fields, unknown fields, malformed base64, wrong message_id length) |
+| `PmeKeyDerivationTests` | `deriveFooterKey` null/length guards, determinism, sensitivity to data key and message_id, known all-zero vector; `buildAadPrefix` null/length guards, byte-level structure, determinism, sensitivity to message_id |
+
+Pending integration / scenario tests:
 
 - Restart reads old encrypted files.
 - Many files in one index require one KMS unwrap per cold data-key cache.
 - Missing index-level `keyfile` fails.
 - Provider/KMS failures follow the Lucene-compatible key-provider path.
-- Malformed PME key metadata fails closed.
-- `PmeFileKeyMetadata` round-trip and rejection tests.
-- `PmeKeyDerivation` derivation and AAD prefix tests.

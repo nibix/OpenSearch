@@ -38,16 +38,16 @@ use crate::cross_rt_stream::CrossRtStream;
 use crate::executor::DedicatedExecutor;
 use crate::api::DataFusionRuntime;
 
-const OPENSEARCH_PME_FACTORY_ID: &str = "opensearch_pme";
+pub const OPENSEARCH_PME_FACTORY_ID: &str = "opensearch_pme";
 
 #[derive(Debug)]
-struct OpenSearchPmeDecryptionFactory {
+pub struct OpenSearchPmeDecryptionFactory {
     file_footer_keys: Arc<HashMap<String, Vec<u8>>>,
     file_aad_prefixes: Arc<HashMap<String, Vec<u8>>>,
 }
 
 impl OpenSearchPmeDecryptionFactory {
-    fn new(file_footer_keys: Arc<HashMap<String, Vec<u8>>>, file_aad_prefixes: Arc<HashMap<String, Vec<u8>>>) -> Self {
+    pub fn new(file_footer_keys: Arc<HashMap<String, Vec<u8>>>, file_aad_prefixes: Arc<HashMap<String, Vec<u8>>>) -> Self {
         Self { file_footer_keys, file_aad_prefixes }
     }
 }
@@ -59,7 +59,7 @@ impl EncryptionFactory for OpenSearchPmeDecryptionFactory {
         _config: &EncryptionFactoryOptions,
         _schema: &SchemaRef,
         _file_path: &Path,
-    ) -> datafusion_common::Result<Option<FileEncryptionProperties>> {
+    ) -> datafusion_common::Result<Option<Arc<FileEncryptionProperties>>> {
         Ok(None)
     }
 
@@ -67,7 +67,7 @@ impl EncryptionFactory for OpenSearchPmeDecryptionFactory {
         &self,
         _config: &EncryptionFactoryOptions,
         file_path: &Path,
-    ) -> datafusion_common::Result<Option<FileDecryptionProperties>> {
+    ) -> datafusion_common::Result<Option<Arc<FileDecryptionProperties>>> {
         let filename = match file_path.filename() {
             Some(f) => f,
             None => return Ok(None),
@@ -151,8 +151,18 @@ pub async fn execute_query(
 
     let ctx = SessionContext::new_with_state(state);
 
-    // Register table via ListingTable — all IO goes through object store
-    let file_format = ParquetFormat::new();
+    // Register table via ListingTable — all IO goes through object store.
+    // If PME footer keys are present the factory is registered above and
+    // ParquetFormat must reference it via factory_id so that
+    // get_file_decryption_properties returns the right properties at scan time.
+    let file_format = if file_footer_keys.is_empty() == false {
+        use datafusion_common::config::TableParquetOptions;
+        let mut parquet_options = TableParquetOptions::default();
+        parquet_options.crypto.factory_id = Some(OPENSEARCH_PME_FACTORY_ID.to_owned());
+        ParquetFormat::new().with_options(parquet_options)
+    } else {
+        ParquetFormat::new()
+    };
     let listing_options = ListingOptions::new(Arc::new(file_format))
         .with_file_extension(".parquet")
         .with_collect_stat(true);

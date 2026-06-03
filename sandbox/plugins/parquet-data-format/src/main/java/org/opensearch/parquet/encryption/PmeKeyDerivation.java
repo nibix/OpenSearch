@@ -19,7 +19,7 @@ import java.util.Objects;
  * Key derivation (two-step HMAC-SHA384, mirrors Lucene storage encryption):
  *   PRK          = HMAC-SHA384(key=dataKey, data=messageId)
  *   T1           = HMAC-SHA384(key=PRK,     data=context||0x01)
- *   pmeFooterKey = first 32 bytes of T1
+ *   pmeFooterKey = first 16 bytes of T1 (TODO: Should be full 32 bytes)
  *   context      = "opensearch/parquet-pme/footer-key/v1"
  *
  * AAD prefix (binary, not JSON):
@@ -30,9 +30,12 @@ public final class PmeKeyDerivation {
     private static final String AAD_DOMAIN = "opensearch/parquet-pme/file/v1";
     private static final int AAD_VERSION_BYTE = 1;
     private static final String HMAC_ALGORITHM = "HmacSHA384";
-    static final int DATA_KEY_BYTES = 32;
+    public static final int DATA_KEY_BYTES = 32;
     static final int MESSAGE_ID_BYTES = 16;
-    static final int FOOTER_KEY_BYTES = 32;
+    /**
+     * TODO: For now, only write 16 bytes due to limitations in parquet-rs
+     */
+    static final int FOOTER_KEY_BYTES = 16;
     private PmeKeyDerivation() {}
     /**
      * Derives the 32-byte PME footer key from the 32-byte data key and 16-byte message_id.

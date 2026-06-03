@@ -201,6 +201,7 @@ pub(crate) struct ShardView {
     pub table_path: ListingTableUrl,
     pub object_metas: Arc<Vec<object_store::ObjectMeta>>,
     pub file_footer_keys: Arc<HashMap<String, Vec<u8>>>,
+    pub file_aad_prefixes: Arc<HashMap<String, Vec<u8>>>,
 }
 
 /// Creates a DataFusion global runtime with the given resource limits.
@@ -248,6 +249,7 @@ pub fn create_reader(
     table_path: &str,
     mut filenames: Vec<String>,
     file_footer_keys: HashMap<String, Vec<u8>>,
+    file_aad_prefixes: HashMap<String, Vec<u8>>,
     tokio_rt_manager: &RuntimeManager,
 ) -> Result<i64, DataFusionError> {
     filenames.sort();
@@ -267,6 +269,7 @@ pub fn create_reader(
         table_path: table_url,
         object_metas: Arc::new(object_metas),
         file_footer_keys: Arc::new(file_footer_keys),
+        file_aad_prefixes: Arc::new(file_aad_prefixes),
     };
     Ok(Box::into_raw(Box::new(shard_view)) as i64)
 }
@@ -302,6 +305,7 @@ pub async unsafe fn execute_query(
     let table_path = shard_view.table_path.clone();
     let object_metas = shard_view.object_metas.clone();
     let file_footer_keys = shard_view.file_footer_keys.clone();
+    let file_aad_prefixes = shard_view.file_aad_prefixes.clone();
     let cpu_executor = manager.cpu_executor();
 
     let result = crate::query_executor::execute_query(
@@ -310,6 +314,7 @@ pub async unsafe fn execute_query(
         table_name.to_string(),
         plan_bytes.to_vec(),
         file_footer_keys,
+        file_aad_prefixes,
         runtime,
         cpu_executor,
     )
@@ -389,6 +394,8 @@ pub unsafe fn sql_to_substrait(
     let runtime = &*(runtime_ptr as *const DataFusionRuntime);
     let table_path = shard_view.table_path.clone();
     let object_metas = shard_view.object_metas.clone();
+    let file_footer_keys = shard_view.file_footer_keys.clone();
+    let file_aad_prefixes = shard_view.file_aad_prefixes.clone();
     let table_name = table_name.to_string();
 
     manager.io_runtime.block_on(async {
@@ -413,6 +420,30 @@ pub unsafe fn sql_to_substrait(
             )
             .build()?;
 
+        // Register the PME decryption factory and configure ParquetFormat with the factory_id
+        // so that infer_schema can read the encrypted Parquet footer.
+        // Note: registering the factory in RuntimeEnv alone is not sufficient — ParquetFormat
+        // must also have options.crypto.factory_id set, otherwise get_file_decryption_properties
+        // returns None and infer_schema fails with "encrypted footer but decryption properties
+        // were not provided".
+        let parquet_format = if file_footer_keys.is_empty() == false {
+            use crate::query_executor::OPENSEARCH_PME_FACTORY_ID;
+            use crate::query_executor::OpenSearchPmeDecryptionFactory;
+            use datafusion_common::config::TableParquetOptions;
+            runtime_env.register_parquet_encryption_factory(
+                OPENSEARCH_PME_FACTORY_ID,
+                Arc::new(OpenSearchPmeDecryptionFactory::new(
+                    Arc::clone(&file_footer_keys),
+                    Arc::clone(&file_aad_prefixes),
+                )),
+            );
+            let mut parquet_options = TableParquetOptions::default();
+            parquet_options.crypto.factory_id = Some(OPENSEARCH_PME_FACTORY_ID.to_owned());
+            ParquetFormat::new().with_options(parquet_options)
+        } else {
+            ParquetFormat::new()
+        };
+
         let state = SessionStateBuilder::new()
             .with_config(SessionConfig::new())
             .with_runtime_env(Arc::from(runtime_env))
@@ -420,7 +451,7 @@ pub unsafe fn sql_to_substrait(
             .build();
         let ctx = datafusion::prelude::SessionContext::new_with_state(state);
 
-        let listing_options = ListingOptions::new(Arc::new(ParquetFormat::new()))
+        let listing_options = ListingOptions::new(Arc::new(parquet_format))
             .with_file_extension(".parquet")
             .with_collect_stat(true);
         let schema = listing_options.infer_schema(&ctx.state(), &table_path).await?;

@@ -23,6 +23,7 @@ import org.opensearch.index.shard.ShardPath;
 import org.opensearch.plugins.CryptoKeyProviderPlugin;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.HashMap;
@@ -107,15 +108,20 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
         if (didRefresh == false) return;
         if (readers.containsKey(catalogSnapshot)) return;
         Collection<WriterFileSet> fileSets = catalogSnapshot.getSearchableFiles(dataFormat.name());
-        Map<String, byte[]> fileFooterKeys = rehydrateFooterKeys(fileSets);
-        DatafusionReader reader = new DatafusionReader(directoryPath, fileSets, fileFooterKeys);
+        Map<String, byte[]> fileFooterKeys = new HashMap<>();
+        Map<String, byte[]> fileAadPrefixes = new HashMap<>();
+        rehydrateEncryptionMaterial(fileSets, fileFooterKeys, fileAadPrefixes);
+        DatafusionReader reader = new DatafusionReader(directoryPath, fileSets, fileFooterKeys, fileAadPrefixes);
         readers.put(catalogSnapshot, reader);
     }
 
-    private Map<String, byte[]> rehydrateFooterKeys(Collection<WriterFileSet> fileSets) throws IOException {
-        Map<String, byte[]> decryptedKeys = new HashMap<>();
+    private void rehydrateEncryptionMaterial(
+        Collection<WriterFileSet> fileSets,
+        Map<String, byte[]> fileFooterKeys,
+        Map<String, byte[]> fileAadPrefixes
+    ) throws IOException {
         if (fileSets == null || fileSets.isEmpty()) {
-            return decryptedKeys;
+            return;
         }
 
         try (MasterKeyProvider keyProvider = createKeyProviderForRead()) {
@@ -145,12 +151,84 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
                     if (decryptedKey == null || decryptedKey.length == 0) {
                         throw new IOException("Failed to decrypt wrapped footer key for file: " + file);
                     }
-                    decryptedKeys.put(file, decryptedKey);
+                    fileFooterKeys.put(file, decryptedKey);
+
+                    // Derive the AAD prefix from the PME key metadata stored in the file.
+                    // Mirrors PmeKeyDerivation.buildAadPrefix() — inlined here to avoid a
+                    // compile-scope dependency on parquet-data-format (which is test-only).
+                    String keyMetadataJson = metadata.get("opensearch.pme.key_metadata_json");
+                    if (keyMetadataJson != null && keyMetadataJson.isBlank() == false) {
+                        byte[] messageId = parseMessageIdFromKeyMetadataJson(file, keyMetadataJson);
+                        fileAadPrefixes.put(file, buildAadPrefix(messageId));
+                    }
                 }
             }
         }
+    }
 
-        return decryptedKeys;
+    // TODO: The two helpers below (parseMessageIdFromKeyMetadataJson, buildAadPrefix) duplicate
+    //  logic that lives canonically in PmeFileKeyMetadata and PmeKeyDerivation inside the
+    //  parquet-data-format plugin. They are inlined here because parquet-data-format is only on
+    //  the testImplementation classpath of this module — adding it as a compile/implementation
+    //  dependency would create a plugin-to-plugin compile dependency that causes jar-hell at
+    //  runtime (both plugins load in separate classloaders under the same OpenSearch node).
+    //  The right long-term fix is to extract the shared PME crypto primitives into a dedicated
+    //  library module (e.g. sandbox:libs:pme-crypto) that both plugins can depend on without
+    //  classloader conflicts. Until then, keep these helpers in sync with the originals manually.
+
+    /**
+     * Parses the {@code message_id} field from a minimal v1 PME key-metadata JSON string.
+     * Inlined from {@code PmeFileKeyMetadata.parse()} — see TODO above.
+     */
+    private static byte[] parseMessageIdFromKeyMetadataJson(String file, String json) throws IOException {
+        // Minimal hand-rolled extraction: locate "message_id":"<value>" without pulling in Jackson.
+        String marker = "\"message_id\":\"";
+        int start = json.indexOf(marker);
+        if (start < 0) {
+            throw new IOException("PME key metadata missing message_id for file: " + file);
+        }
+        start += marker.length();
+        int end = json.indexOf('"', start);
+        if (end < 0) {
+            throw new IOException("PME key metadata malformed message_id for file: " + file);
+        }
+        String b64 = json.substring(start, end);
+        byte[] messageId;
+        try {
+            messageId = Base64.getUrlDecoder().decode(b64);
+        } catch (IllegalArgumentException e) {
+            throw new IOException("PME key metadata invalid base64url message_id for file: " + file, e);
+        }
+        if (messageId.length != 16) {
+            throw new IOException("PME key metadata message_id must be 16 bytes for file: " + file);
+        }
+        return messageId;
+    }
+
+    /**
+     * Builds the v1 binary AAD prefix for the given 16-byte message_id.
+     * Inlined from {@code PmeKeyDerivation.buildAadPrefix()} — see TODO above.
+     *
+     * <pre>
+     * u16_be(domain.len) || domain || u8(1) || u16_be(dataKeyId.len) || dataKeyId || messageId[16]
+     * </pre>
+     */
+    private static byte[] buildAadPrefix(byte[] messageId) {
+        byte[] domain = "opensearch/parquet-pme/file/v1".getBytes(StandardCharsets.UTF_8);
+        byte[] dataKeyId = "default".getBytes(StandardCharsets.UTF_8);
+        byte[] aad = new byte[2 + domain.length + 1 + 2 + dataKeyId.length + 16];
+        int pos = 0;
+        aad[pos++] = (byte) (domain.length >>> 8);
+        aad[pos++] = (byte) domain.length;
+        System.arraycopy(domain, 0, aad, pos, domain.length);
+        pos += domain.length;
+        aad[pos++] = 0x01; // version
+        aad[pos++] = (byte) (dataKeyId.length >>> 8);
+        aad[pos++] = (byte) dataKeyId.length;
+        System.arraycopy(dataKeyId, 0, aad, pos, dataKeyId.length);
+        pos += dataKeyId.length;
+        System.arraycopy(messageId, 0, aad, pos, 16);
+        return aad;
     }
 
     private MasterKeyProvider createKeyProviderForRead() {

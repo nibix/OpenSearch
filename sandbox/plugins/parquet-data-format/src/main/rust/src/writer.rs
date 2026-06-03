@@ -113,9 +113,10 @@ impl NativeParquetWriter {
             .set_bloom_filter_ndv(100000);
 
         if let Some(options) = encryption_options {
-            if options.footer_key.len() != 32 {
+            // TODO at the moment, parquet-rs only supports 16 byte keys. This is in deviation of the intended target state.
+            if options.footer_key.len() != 16 {
                 return Err(format!(
-                    "PME footer_key must be 32 bytes, got {}",
+                    "PME footer_key must be 16 bytes, got {}",
                     options.footer_key.len()
                 ).into());
             }

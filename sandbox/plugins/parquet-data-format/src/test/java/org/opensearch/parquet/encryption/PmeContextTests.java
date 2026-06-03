@@ -108,24 +108,6 @@ public class PmeContextTests extends OpenSearchTestCase {
         assertFalse("cache must already contain the key after create()", loaderCalled.get());
     }
 
-    // ---- createFileEncryptionInputs ----
-
-    public void testCreateFileEncryptionInputsReturns32ByteFooterKey() throws IOException {
-        PmeContext ctx = PmeContext.create(encryptedIndexSettings(), indexDataPath, 0, loaderFor(provider));
-        assertNotNull(ctx);
-
-        PmeFileEncryptionInputs inputs = ctx.createFileEncryptionInputs();
-        assertNotNull(inputs);
-
-        byte[] footerKey = inputs.footerKey();
-        try {
-            assertEquals(KEY_LEN, footerKey.length);
-        } finally {
-            Arrays.fill(footerKey, (byte) 0);
-            inputs.zero();
-        }
-    }
-
     // ---- evict ----
 
     public void testEvictZerosCachedKeyMaterial() throws IOException {

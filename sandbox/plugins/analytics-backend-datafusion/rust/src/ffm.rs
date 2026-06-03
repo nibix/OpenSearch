@@ -157,6 +157,12 @@ pub unsafe extern "C" fn df_create_reader(
     key_bytes_ptr: *const *const u8,
     key_bytes_len_ptr: *const i64,
     key_bytes_count: i64,
+    aad_files_ptr: *const *const u8,
+    aad_files_len_ptr: *const i64,
+    aad_files_count: i64,
+    aad_bytes_ptr: *const *const u8,
+    aad_bytes_len_ptr: *const i64,
+    aad_bytes_count: i64,
 ) -> i64 {
     let table_path = str_from_raw(table_path_ptr, table_path_len).map_err(|e| format!("df_create_reader: {}", e))?;
     let filenames = string_array_from_raw(files_ptr, files_len_ptr, files_count, "files")
@@ -170,8 +176,17 @@ pub unsafe extern "C" fn df_create_reader(
         key_bytes_count,
     )
     .map_err(|e| format!("df_create_reader: {}", e))?;
+    let file_aad_prefixes = footer_keys_from_raw(
+        aad_files_ptr,
+        aad_files_len_ptr,
+        aad_files_count,
+        aad_bytes_ptr,
+        aad_bytes_len_ptr,
+        aad_bytes_count,
+    )
+    .map_err(|e| format!("df_create_reader: {}", e))?;
     let mgr = get_rt_manager()?;
-    api::create_reader(table_path, filenames, file_footer_keys, &mgr).map_err(|e| e.to_string())
+    api::create_reader(table_path, filenames, file_footer_keys, file_aad_prefixes, &mgr).map_err(|e| e.to_string())
 }
 
 #[no_mangle]
