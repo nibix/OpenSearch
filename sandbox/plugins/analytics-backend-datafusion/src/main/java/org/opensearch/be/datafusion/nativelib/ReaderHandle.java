@@ -23,14 +23,15 @@ public final class ReaderHandle extends NativeHandle {
      * @param files the array of file names to read
      */
     public ReaderHandle(String path, String[] files) {
-        this(path, files, new String[0], new byte[0][]);
+        this(path, files, new String[0], new byte[0][], new String[0], new byte[0][]);
     }
 
     /**
-     * Creates a reader handle with optional footer keys for encrypted files.
+     * Creates a reader handle with optional footer keys and AAD prefixes for encrypted files.
      */
-    public ReaderHandle(String path, String[] files, String[] encryptedFiles, byte[][] footerKeys) {
-        super(NativeBridge.createDatafusionReader(path, files, encryptedFiles, footerKeys));
+    public ReaderHandle(String path, String[] files, String[] encryptedFiles, byte[][] footerKeys,
+                        String[] aadFiles, byte[][] aadPrefixes) {
+        super(NativeBridge.createDatafusionReader(path, files, encryptedFiles, footerKeys, aadFiles, aadPrefixes));
         this.ownsPointer = true;
     }
 

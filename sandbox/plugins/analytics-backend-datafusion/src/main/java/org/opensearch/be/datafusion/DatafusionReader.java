@@ -37,16 +37,29 @@ public class DatafusionReader implements Closeable {
     private final ReaderHandle readerHandle;
 
     /**
-     * Creates a DatafusionReader for the given shard directory and files.
+     * Creates a DatafusionReader for the given shard directory and files (no encryption).
      *
      * @param directoryPath shard data directory
      * @param files The file metadata collection
      */
     public DatafusionReader(String directoryPath, Collection<WriterFileSet> files) {
-        this(directoryPath, files, Map.of());
+        this(directoryPath, files, Map.of(), Map.of());
     }
 
-    public DatafusionReader(String directoryPath, Collection<WriterFileSet> files, Map<String, byte[]> fileFooterKeys) {
+    /**
+     * Creates a DatafusionReader with per-file footer keys and AAD prefixes for PME-encrypted files.
+     *
+     * @param directoryPath  shard data directory
+     * @param files          file metadata collection
+     * @param fileFooterKeys map from absolute file path to 32-byte AES-GCM footer key
+     * @param fileAadPrefixes map from absolute file path to binary AAD prefix bytes
+     */
+    public DatafusionReader(
+        String directoryPath,
+        Collection<WriterFileSet> files,
+        Map<String, byte[]> fileFooterKeys,
+        Map<String, byte[]> fileAadPrefixes
+    ) {
         this.directoryPath = directoryPath;
         String[] fileNames = new String[0];
         if (files != null) {
@@ -58,9 +71,20 @@ public class DatafusionReader implements Closeable {
             encryptedFilesList.add(entry.getKey());
             footerKeysList.add(entry.getValue());
         }
-        String[] encryptedFiles = encryptedFilesList.toArray(String[]::new);
-        byte[][] footerKeys = footerKeysList.toArray(new byte[0][]);
-        readerHandle = new ReaderHandle(directoryPath, fileNames, encryptedFiles, footerKeys);
+        List<String> aadFilesList = new ArrayList<>(fileAadPrefixes.size());
+        List<byte[]> aadPrefixList = new ArrayList<>(fileAadPrefixes.size());
+        for (Map.Entry<String, byte[]> entry : fileAadPrefixes.entrySet()) {
+            aadFilesList.add(entry.getKey());
+            aadPrefixList.add(entry.getValue());
+        }
+        readerHandle = new ReaderHandle(
+            directoryPath,
+            fileNames,
+            encryptedFilesList.toArray(String[]::new),
+            footerKeysList.toArray(new byte[0][]),
+            aadFilesList.toArray(String[]::new),
+            aadPrefixList.toArray(new byte[0][])
+        );
     }
 
     /**

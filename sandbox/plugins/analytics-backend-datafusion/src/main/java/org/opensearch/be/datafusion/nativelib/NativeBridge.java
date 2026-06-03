@@ -51,6 +51,9 @@ public final class NativeBridge {
     private static final MethodHandle STREAM_NEXT;
     private static final MethodHandle STREAM_CLOSE;
     private static final MethodHandle SQL_TO_SUBSTRAIT;
+    // parquet_read_key_metadata — from parquet-data-format rlib baked into the same .so.
+    // Returns 0 if key_metadata present (written to out_buf); 1 if not encrypted / no key_metadata.
+    private static final MethodHandle READ_KEY_METADATA;
 
     static {
         SymbolLookup lib = NativeLibraryLoader.symbolLookup();
@@ -82,21 +85,33 @@ public final class NativeBridge {
             FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG)
         );
 
+        // df_create_reader(path, path_len,
+        //   files_ptrs, files_lens, files_count,
+        //   key_files_ptrs, key_files_lens, key_files_count,
+        //   key_bytes_ptrs, key_bytes_lens, key_bytes_count,
+        //   aad_files_ptrs, aad_files_lens, aad_files_count,
+        //   aad_bytes_ptrs, aad_bytes_lens, aad_bytes_count) -> i64
         CREATE_READER = linker.downcallHandle(
             lib.find("df_create_reader").orElseThrow(),
             FunctionDescriptor.of(
                 ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG,
-                ValueLayout.ADDRESS,
-                ValueLayout.ADDRESS,
-                ValueLayout.JAVA_LONG
+                ValueLayout.ADDRESS,   // path
+                ValueLayout.JAVA_LONG, // path_len
+                ValueLayout.ADDRESS,   // files_ptrs
+                ValueLayout.ADDRESS,   // files_lens
+                ValueLayout.JAVA_LONG, // files_count
+                ValueLayout.ADDRESS,   // key_files_ptrs
+                ValueLayout.ADDRESS,   // key_files_lens
+                ValueLayout.JAVA_LONG, // key_files_count
+                ValueLayout.ADDRESS,   // key_bytes_ptrs
+                ValueLayout.ADDRESS,   // key_bytes_lens
+                ValueLayout.JAVA_LONG,  // key_bytes_count
+                ValueLayout.ADDRESS,  // aad_files_ptrs
+                ValueLayout.ADDRESS, // aad_files_lens
+                 ValueLayout.JAVA_LONG,   // aad_files_count
+                ValueLayout.ADDRESS, // aad_bytes_ptrs
+                ValueLayout.ADDRESS, // aad_bytes_lens
+                ValueLayout.JAVA_LONG    // aad_bytes_count
             )
         );
 
@@ -143,6 +158,17 @@ public final class NativeBridge {
                 ValueLayout.ADDRESS
             )
         );
+
+        // parquet_read_key_metadata(file_ptr, file_len, out_buf, out_buf_len, out_len_out) -> i64
+        READ_KEY_METADATA = linker.downcallHandle(
+            lib.find("parquet_read_key_metadata").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,  // file
+                ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,  // out_buf
+                ValueLayout.ADDRESS                           // out_len_out
+            )
+        );
     }
 
     private NativeBridge() {}
@@ -183,18 +209,40 @@ public final class NativeBridge {
      * Freed by {@link #closeDatafusionReader}.
      */
     public static long createDatafusionReader(String path, String[] files) {
-        return createDatafusionReader(path, files, new String[0], new byte[0][]);
+        return createDatafusionReader(path, files, new String[0], new byte[0][], new String[0], new byte[0][]);
     }
 
-    public static long createDatafusionReader(String path, String[] files, String[] encryptedFiles, byte[][] footerKeys) {
+    /**
+     * Creates a native reader with optional footer keys and AAD prefixes for encrypted files.
+     *
+     * @param path           the directory path containing data files
+     * @param files          all file names to expose to DataFusion
+     * @param encryptedFiles file names that are PME-encrypted (must align with footerKeys)
+     * @param footerKeys     per-file 32-byte AES-GCM footer keys (must align with encryptedFiles)
+     * @param aadFiles       file names that have a non-empty AAD prefix (subset of encryptedFiles)
+     * @param aadPrefixes    per-file AAD prefix bytes (must align with aadFiles)
+     */
+    public static long createDatafusionReader(
+        String path,
+        String[] files,
+        String[] encryptedFiles,
+        byte[][] footerKeys,
+        String[] aadFiles,
+        byte[][] aadPrefixes
+    ) {
         if (encryptedFiles.length != footerKeys.length) {
             throw new IllegalArgumentException("encryptedFiles and footerKeys must have same length");
+        }
+        if (aadFiles.length != aadPrefixes.length) {
+            throw new IllegalArgumentException("aadFiles and aadPrefixes must have same length");
         }
         try (var call = new NativeCall()) {
             var p = call.str(path);
             var f = call.strArray(files);
             var ef = call.strArray(encryptedFiles);
             var keys = call.bytesArray(footerKeys);
+            var af = call.strArray(aadFiles);
+            var aads = call.bytesArray(aadPrefixes);
             return call.invoke(
                 CREATE_READER,
                 p.segment(),
@@ -207,7 +255,9 @@ public final class NativeBridge {
                 ef.count(),
                 keys.ptrs(),
                 keys.lens(),
-                keys.count()
+                keys.count(),
+                af.ptrs(), af.lens(), af.count(),
+                aads.ptrs(), aads.lens(), aads.count()
             );
         }
     }
@@ -305,4 +355,29 @@ public final class NativeBridge {
     public static void cacheManagerRemoveFiles(long runtimePtr, String[] filePaths) {}
 
     public static void initLogger() {}
+
+    /**
+     * Reads the plaintext {@code key_metadata} bytes from an encrypted Parquet file without
+     * decrypting the footer. Returns {@code null} if the file is not encrypted or has no
+     * {@code key_metadata}.
+     *
+     * @param filePath absolute path to the Parquet file
+     * @return key_metadata bytes, or {@code null}
+     */
+    public static byte[] readParquetKeyMetadata(String filePath) {
+        try (var call = new NativeCall()) {
+            var f = call.str(filePath);
+            var out = call.outBuffer(512);
+            long rc = call.invoke(READ_KEY_METADATA, f.segment(), f.len(), out.data(), (long) out.capacity(), out.lenOut());
+            if (rc == 1) {
+                // Not encrypted or no key_metadata.
+                return null;
+            }
+            int len = out.actualLength();
+            if (len < 0) {
+                return null;
+            }
+            return out.data().asSlice(0, len).toArray(ValueLayout.JAVA_BYTE);
+        }
+    }
 }

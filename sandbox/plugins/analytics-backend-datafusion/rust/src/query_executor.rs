@@ -43,11 +43,12 @@ const OPENSEARCH_PME_FACTORY_ID: &str = "opensearch_pme";
 #[derive(Debug)]
 struct OpenSearchPmeDecryptionFactory {
     file_footer_keys: Arc<HashMap<String, Vec<u8>>>,
+    file_aad_prefixes: Arc<HashMap<String, Vec<u8>>>,
 }
 
 impl OpenSearchPmeDecryptionFactory {
-    fn new(file_footer_keys: Arc<HashMap<String, Vec<u8>>>) -> Self {
-        Self { file_footer_keys }
+    fn new(file_footer_keys: Arc<HashMap<String, Vec<u8>>>, file_aad_prefixes: Arc<HashMap<String, Vec<u8>>>) -> Self {
+        Self { file_footer_keys, file_aad_prefixes }
     }
 }
 
@@ -58,7 +59,7 @@ impl EncryptionFactory for OpenSearchPmeDecryptionFactory {
         _config: &EncryptionFactoryOptions,
         _schema: &SchemaRef,
         _file_path: &Path,
-    ) -> datafusion_common::Result<Option<Arc<FileEncryptionProperties>>> {
+    ) -> datafusion_common::Result<Option<FileEncryptionProperties>> {
         Ok(None)
     }
 
@@ -66,13 +67,24 @@ impl EncryptionFactory for OpenSearchPmeDecryptionFactory {
         &self,
         _config: &EncryptionFactoryOptions,
         file_path: &Path,
-    ) -> datafusion_common::Result<Option<Arc<FileDecryptionProperties>>> {
-        match self.file_footer_keys.get(file_path.filename()) {
+    ) -> datafusion_common::Result<Option<FileDecryptionProperties>> {
+        let filename = match file_path.filename() {
+            Some(f) => f,
+            None => return Ok(None),
+        };
+        match self.file_footer_keys.get(filename) {
             Some(footer_key) => {
-                let properties = FileDecryptionProperties::builder(footer_key.clone())
+                let mut builder = FileDecryptionProperties::builder(footer_key.clone());
+                // Set the AAD prefix if present — required for files written with an AAD prefix.
+                if let Some(aad_prefix) = self.file_aad_prefixes.get(filename) {
+                    if !aad_prefix.is_empty() {
+                        builder = builder.with_aad_prefix(aad_prefix.clone());
+                    }
+                }
+                let properties = builder
                     .build()
                     .map_err(|e| DataFusionError::Execution(format!("Failed to build PME decryption properties: {}", e)))?;
-                Ok(Some(Arc::new(properties)))
+                Ok(Some(properties))
             }
             None => Ok(None),
         }
@@ -87,6 +99,7 @@ pub async fn execute_query(
     table_name: String,
     plan_bytes: Vec<u8>,
     file_footer_keys: Arc<HashMap<String, Vec<u8>>>,
+    file_aad_prefixes: Arc<HashMap<String, Vec<u8>>>,
     runtime: &DataFusionRuntime,
     cpu_executor: DedicatedExecutor,
 ) -> Result<i64, DataFusionError> {
@@ -120,7 +133,7 @@ pub async fn execute_query(
     if file_footer_keys.is_empty() == false {
         runtime_env.register_parquet_encryption_factory(
             OPENSEARCH_PME_FACTORY_ID,
-            Arc::new(OpenSearchPmeDecryptionFactory::new(Arc::clone(&file_footer_keys))),
+            Arc::new(OpenSearchPmeDecryptionFactory::new(Arc::clone(&file_footer_keys), Arc::clone(&file_aad_prefixes))),
         );
     }
 
@@ -129,9 +142,6 @@ pub async fn execute_query(
     config.options_mut().execution.parquet.pushdown_filters = false;
     config.options_mut().execution.target_partitions = 4;
     config.options_mut().execution.batch_size = 8192;
-    if file_footer_keys.is_empty() == false {
-        config.options_mut().execution.parquet.crypto.factory_id = Some(OPENSEARCH_PME_FACTORY_ID.to_string());
-    }
 
     let state = SessionStateBuilder::new()
         .with_config(config)
