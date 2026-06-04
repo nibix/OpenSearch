@@ -13,6 +13,9 @@ import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 /**
  * Node-level cache for PME index data keys.
  *
@@ -53,6 +56,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * </ul>
  */
 public final class PmeDataKeyCache {
+
+    private static final Logger logger = LogManager.getLogger(PmeDataKeyCache.class);
 
     private static PmeDataKeyCache INSTANCE;
 
@@ -110,17 +115,21 @@ public final class PmeDataKeyCache {
         PmeCacheKey key = new PmeCacheKey(indexUuid, shardId, dataKeyId);
         PmeDataKey existing = cache.get(key);
         if (existing != null) {
+            logger.trace("PME key cache: HIT for index=[{}] shard=[{}] keyId=[{}]", indexUuid, shardId, dataKeyId);
             return existing;
         }
         synchronized (cache) {
             existing = cache.get(key);
             if (existing != null) {
+                logger.trace("PME key cache: HIT (double-check) for index=[{}] shard=[{}] keyId=[{}]", indexUuid, shardId, dataKeyId);
                 return existing;
             }
+            logger.trace("PME key cache: MISS for index=[{}] shard=[{}] keyId=[{}] — loading from keyfile", indexUuid, shardId, dataKeyId);
             byte[] rawKey = loader.load();
             try {
                 PmeDataKey dataKey = new PmeDataKey(rawKey);
                 cache.put(key, dataKey);
+                logger.trace("PME key cache: stored new key for index=[{}] shard=[{}] keyId=[{}]", indexUuid, shardId, dataKeyId);
                 return dataKey;
             } finally {
                 Arrays.fill(rawKey, (byte) 0);
@@ -141,7 +150,10 @@ public final class PmeDataKeyCache {
         PmeCacheKey key = new PmeCacheKey(indexUuid, shardId, dataKeyId);
         PmeDataKey removed = cache.remove(key);
         if (removed != null) {
+            logger.trace("PME key cache: evicted and zeroed key for index=[{}] shard=[{}] keyId=[{}]", indexUuid, shardId, dataKeyId);
             removed.zero();
+        } else {
+            logger.trace("PME key cache: evict called but no entry found for index=[{}] shard=[{}] keyId=[{}]", indexUuid, shardId, dataKeyId);
         }
     }
 

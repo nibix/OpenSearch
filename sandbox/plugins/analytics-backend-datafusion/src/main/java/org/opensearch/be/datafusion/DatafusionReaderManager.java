@@ -107,10 +107,12 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
     public void afterRefresh(boolean didRefresh, CatalogSnapshot catalogSnapshot) throws IOException {
         if (didRefresh == false) return;
         if (readers.containsKey(catalogSnapshot)) return;
+        logger.trace("DataFusion PME: afterRefresh — building reader encrypted=[{}]", cryptoMetadata.isPresent());
         Collection<WriterFileSet> fileSets = catalogSnapshot.getSearchableFiles(dataFormat.name());
         Map<String, byte[]> fileFooterKeys = new HashMap<>();
         Map<String, byte[]> fileAadPrefixes = new HashMap<>();
         rehydrateEncryptionMaterial(fileSets, fileFooterKeys, fileAadPrefixes);
+        logger.trace("DataFusion PME: rehydrated keys for {} files", fileFooterKeys.size());
         DatafusionReader reader = new DatafusionReader(directoryPath, fileSets, fileFooterKeys, fileAadPrefixes);
         readers.put(catalogSnapshot, reader);
     }
@@ -124,11 +126,13 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
             return;
         }
 
+        logger.trace("DataFusion PME: rehydrateEncryptionMaterial — {} file sets", fileSets.size());
         try (MasterKeyProvider keyProvider = createKeyProviderForRead()) {
             for (WriterFileSet fileSet : fileSets) {
                 for (String file : fileSet.files()) {
                     Map<String, String> metadata = fileSet.metadataForFile(file);
                     boolean encrypted = "true".equals(metadata.get(PME_ENCRYPTED));
+                    logger.trace("DataFusion PME: file=[{}] encrypted=[{}]", file, encrypted);
                     if (encrypted == false) {
                         continue;
                     }
@@ -147,10 +151,12 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
                     } catch (IllegalArgumentException e) {
                         throw new IOException("Invalid base64 wrapped footer key for file: " + file, e);
                     }
+                    logger.trace("DataFusion PME: decrypting footer key for file=[{}] wrappedKeyLen=[{}]", file, wrappedKey.length);
                     byte[] decryptedKey = keyProvider.decryptKey(wrappedKey);
                     if (decryptedKey == null || decryptedKey.length == 0) {
                         throw new IOException("Failed to decrypt wrapped footer key for file: " + file);
                     }
+                    logger.trace("DataFusion PME: footer key decrypted for file=[{}] keyLen=[{}]", file, decryptedKey.length);
                     fileFooterKeys.put(file, decryptedKey);
 
                     // Derive the AAD prefix from the PME key metadata stored in the file.
@@ -160,10 +166,12 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
                     if (keyMetadataJson != null && keyMetadataJson.isBlank() == false) {
                         byte[] messageId = parseMessageIdFromKeyMetadataJson(file, keyMetadataJson);
                         fileAadPrefixes.put(file, buildAadPrefix(messageId));
+                        logger.trace("DataFusion PME: AAD prefix built for file=[{}]", file);
                     }
                 }
             }
         }
+        logger.trace("DataFusion PME: rehydration complete — {} footer keys, {} AAD prefixes", fileFooterKeys.size(), fileAadPrefixes.size());
     }
 
     // TODO: The two helpers below (parseMessageIdFromKeyMetadataJson, buildAadPrefix) duplicate

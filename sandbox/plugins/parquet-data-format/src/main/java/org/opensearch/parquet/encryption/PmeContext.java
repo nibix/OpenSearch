@@ -135,13 +135,16 @@ public final class PmeContext {
      * @throws IOException if the data key cannot be loaded
      */
     public PmeFileEncryptionInputs createFileEncryptionInputs() throws IOException {
+        logger.trace("PME: createFileEncryptionInputs for index=[{}] shard=[{}]", indexUuid, shardId);
         PmeDataKey dataKey = PmeDataKeyCache.getInstance().getOrLoad(
             indexUuid,
             shardId,
             PmeFileKeyMetadata.DEFAULT_DATA_KEY_ID,
             () -> PmeKeyfileManager.initOrLoad(indexDataPath, cryptoMetadata)
         );
-        return PmeFileEncryptionInputs.create(dataKey);
+        PmeFileEncryptionInputs inputs = PmeFileEncryptionInputs.create(dataKey);
+        logger.trace("PME: file encryption inputs created for index=[{}] shard=[{}]", indexUuid, shardId);
+        return inputs;
     }
 
     /**

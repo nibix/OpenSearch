@@ -8,6 +8,8 @@
 
 package org.opensearch.parquet.encryption;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.opensearch.cluster.metadata.CryptoMetadata;
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
@@ -63,6 +65,8 @@ import java.util.UUID;
  */
 final class PmeKeyfileManager {
 
+    private static final Logger logger = LogManager.getLogger(PmeKeyfileManager.class);
+
     static final String KEYFILE_NAME = "keyfile";
 
     private PmeKeyfileManager() {}
@@ -81,6 +85,7 @@ final class PmeKeyfileManager {
      */
     static byte[] initOrLoad(Path indexDataPath, CryptoMetadata cryptoMetadata) throws IOException {
         Path keyfilePath = indexDataPath.resolve(KEYFILE_NAME);
+        logger.trace("PME keyfile initOrLoad: path=[{}] exists=[{}]", keyfilePath, Files.exists(keyfilePath));
         try (MasterKeyProvider provider = createKeyProvider(cryptoMetadata)) {
             if (Files.exists(keyfilePath)) {
                 return loadKey(keyfilePath, provider);
@@ -96,6 +101,7 @@ final class PmeKeyfileManager {
      */
     static byte[] initOrLoad(Path indexDataPath, MasterKeyProvider provider) throws IOException {
         Path keyfilePath = indexDataPath.resolve(KEYFILE_NAME);
+        logger.trace("PME keyfile initOrLoad (test overload): path=[{}] exists=[{}]", keyfilePath, Files.exists(keyfilePath));
         if (Files.exists(keyfilePath)) {
             return loadKey(keyfilePath, provider);
         }
@@ -105,13 +111,16 @@ final class PmeKeyfileManager {
     // ---- private helpers ----
 
     private static byte[] loadKey(Path keyfilePath, MasterKeyProvider provider) throws IOException {
+        logger.trace("PME keyfile: loading existing keyfile from [{}]", keyfilePath);
         byte[] encryptedKey = Files.readAllBytes(keyfilePath);
         byte[] rawKey = provider.decryptKey(encryptedKey);
         validateKeyLength(rawKey, keyfilePath);
+        logger.trace("PME keyfile: key loaded and decrypted from [{}]", keyfilePath);
         return rawKey;
     }
 
     private static byte[] createKey(Path indexDataPath, Path keyfilePath, MasterKeyProvider provider) throws IOException {
+        logger.trace("PME keyfile: no keyfile found, generating new data key at [{}]", keyfilePath);
         DataKeyPair pair = provider.generateDataPair();
         byte[] rawKey = pair.getRawKey();
         validateKeyLength(rawKey, keyfilePath);
@@ -125,8 +134,10 @@ final class PmeKeyfileManager {
         Files.write(tmp, pair.getEncryptedKey(), StandardOpenOption.CREATE_NEW);
         try {
             Files.move(tmp, keyfilePath, StandardCopyOption.ATOMIC_MOVE);
+            logger.trace("PME keyfile: successfully created keyfile at [{}]", keyfilePath);
         } catch (FileAlreadyExistsException | NoSuchFileException e) {
             // Another shard won the race — use their keyfile.
+            logger.trace("PME keyfile: lost rename race at [{}], loading winner's keyfile", keyfilePath);
             Files.deleteIfExists(tmp);
             Arrays.fill(rawKey, (byte) 0);
             rawKey = loadKey(keyfilePath, provider);
