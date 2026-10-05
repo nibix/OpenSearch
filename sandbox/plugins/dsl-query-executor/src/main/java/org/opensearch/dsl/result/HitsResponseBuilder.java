@@ -38,7 +38,9 @@ import java.util.Map;
  * <ul>
  *   <li>{@code _id} is omitted (null): the engine schema exposes only mapped source fields,
  *       no metadata columns. TODO: populate once the engine can project the stored
- *       {@code _id} (and {@code _source}) parquet columns for HITS plans.</li>
+ *       {@code _id} (and {@code _source}) parquet columns for HITS plans. A raw {@code _source}
+ *       value must not bypass field-level security: it must be filtered with the concrete index's
+ *       field predicate before it is returned.</li>
  *   <li>{@code _score}/{@code max_score} are {@link Float#NaN} (rendered {@code null}): the
  *       engine has no relevance scoring, matching legacy's non-scored (field-sorted) responses.</li>
  *   <li>{@code hits.total}: classic {@code track_total_hits} semantics. The COUNT plan's

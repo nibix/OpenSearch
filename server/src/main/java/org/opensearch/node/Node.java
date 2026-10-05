@@ -240,6 +240,7 @@ import org.opensearch.plugins.DefaultPluginComponentRegistry;
 import org.opensearch.plugins.DiscoveryPlugin;
 import org.opensearch.plugins.EnginePlugin;
 import org.opensearch.plugins.ExtensionAwarePlugin;
+import org.opensearch.plugins.FieldFilterProvider;
 import org.opensearch.plugins.IdentityAwarePlugin;
 import org.opensearch.plugins.IdentityPlugin;
 import org.opensearch.plugins.IndexStorePlugin;
@@ -1210,6 +1211,7 @@ public class Node implements Closeable {
             final ViewService viewService = new ViewService(clusterService, client, null);
 
             final DefaultPluginComponentRegistry pluginComponentRegistry = new DefaultPluginComponentRegistry();
+            pluginComponentRegistry.register(new FieldFilterProvider(indicesService.getFieldFilter()));
             final List<Object> pluginComponents = new ArrayList<>();
             for (Plugin p : pluginsService.filterPlugins(Plugin.class)) {
                 Collection<Object> components = p.createComponents(
