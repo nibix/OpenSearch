@@ -17,8 +17,11 @@ import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.IndexReaderProvider.Reader;
+import org.opensearch.index.mapper.FieldValueTransformation;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.tasks.Task;
+
+import java.util.Map;
 
 /**
  * Execution context carrying reader and plan state through
@@ -42,6 +45,7 @@ public class ShardScanExecutionContext implements CommonExecutionContext {
     private QueryCachingPolicy queryCachingPolicy;
     private ShardId shardId;
     private boolean hasPartialAggregate;
+    private Map<String, FieldValueTransformation> fieldValueTransformations = Map.of();
 
     /**
      * Constructs an execution context.
@@ -188,6 +192,15 @@ public class ShardScanExecutionContext implements CommonExecutionContext {
 
     public void setShardId(ShardId shardId) {
         this.shardId = shardId;
+    }
+
+    /** Transformations resolved locally for raw fields on this concrete shard index. */
+    public Map<String, FieldValueTransformation> getFieldValueTransformations() {
+        return fieldValueTransformations;
+    }
+
+    public void setFieldValueTransformations(Map<String, FieldValueTransformation> fieldValueTransformations) {
+        this.fieldValueTransformations = Map.copyOf(fieldValueTransformations);
     }
 
     /** Whether the fragment contains a PARTIAL aggregate instruction. */

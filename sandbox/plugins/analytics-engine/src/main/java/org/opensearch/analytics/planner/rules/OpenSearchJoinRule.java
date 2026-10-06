@@ -15,12 +15,16 @@ import org.apache.calcite.plan.hep.HepRelVertex;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.logical.LogicalJoin;
+import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexShuttle;
 import org.opensearch.analytics.planner.PlannerContext;
 import org.opensearch.analytics.planner.RelNodeUtils;
 import org.opensearch.analytics.planner.rel.OpenSearchDistributionTraitDef;
 import org.opensearch.analytics.planner.rel.OpenSearchExchangeReducer;
 import org.opensearch.analytics.planner.rel.OpenSearchJoin;
 import org.opensearch.analytics.planner.rel.OpenSearchRelNode;
+import org.opensearch.analytics.spi.FieldStorageInfo;
 import org.opensearch.analytics.spi.JoinCapability;
 
 import java.util.ArrayList;
@@ -67,6 +71,7 @@ public class OpenSearchJoinRule extends RelOptRule {
     @Override
     public void onMatch(RelOptRuleCall call) {
         LogicalJoin join = call.rel(0);
+        rejectMaskedJoinReferences(join);
 
         // Viable backends = intersection of inputs' viable backends, narrowed to those whose
         // joinCapabilities declare the join's required JoinKind. Inputs are HepRelVertex-
@@ -103,6 +108,26 @@ public class OpenSearchJoinRule extends RelOptRule {
             viableBackends
         );
         call.transformTo(osJoin);
+    }
+
+    private static void rejectMaskedJoinReferences(LogicalJoin join) {
+        RelNode left = RelNodeUtils.unwrapHep(join.getLeft());
+        RelNode right = RelNodeUtils.unwrapHep(join.getRight());
+        if (!(left instanceof OpenSearchRelNode leftNode) || !(right instanceof OpenSearchRelNode rightNode)) {
+            return;
+        }
+        List<FieldStorageInfo> fields = new ArrayList<>(leftNode.getOutputFieldStorage());
+        fields.addAll(rightNode.getOutputFieldStorage());
+        join.getCondition().accept(new RexShuttle() {
+            @Override
+            public RexNode visitInputRef(RexInputRef inputRef) {
+                FieldStorageInfo field = FieldStorageInfo.resolve(fields, inputRef.getIndex());
+                if (field.isMasked()) {
+                    throw new IllegalArgumentException("Joins are not supported for masked field [" + field.getFieldName() + "]");
+                }
+                return inputRef;
+            }
+        });
     }
 
     /** Intersection of viable backends from left and right children. Children may be

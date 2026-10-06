@@ -12,11 +12,16 @@ import org.opensearch.analytics.spi.FieldStorageInfo;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.MappingMetadata;
+import org.opensearch.index.mapper.FieldValueTransformation;
+import org.opensearch.plugins.FieldValueTransformationProvider;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.function.Function;
 
 /**
  * Resolves per-field storage metadata from {@link IndexMetadata}.
@@ -56,7 +61,19 @@ public class FieldStorageResolver {
 
     @SuppressWarnings("unchecked")
     public FieldStorageResolver(IndexMetadata indexMetadata) {
+        this(indexMetadata, FieldValueTransformationProvider.NOOP);
+    }
+
+    @SuppressWarnings("unchecked")
+    public FieldStorageResolver(
+        IndexMetadata indexMetadata,
+        Function<String, Function<String, Optional<FieldValueTransformation>>> fieldValueTransformations
+    ) {
         String indexName = indexMetadata.getIndex().getName();
+        Function<String, Optional<FieldValueTransformation>> perField = Objects.requireNonNull(
+            fieldValueTransformations.apply(indexName),
+            "field value transformation resolver returned null for index [" + indexName + "]"
+        );
         String primaryFormat = indexMetadata.getSettings().get(PRIMARY_DATA_FORMAT_SETTING, LUCENE_FORMAT);
         // Lucene is index-viable only when it's the primary or in the secondary list.
         boolean luceneAvailable = LUCENE_FORMAT.equals(primaryFormat)
@@ -73,27 +90,58 @@ public class FieldStorageResolver {
 
         this.fieldStorage = new HashMap<>();
         if (properties != null) {
-            populateFromProperties(properties, "", primaryFormat, luceneAvailable);
+            populateFromProperties(properties, "", primaryFormat, luceneAvailable, perField, indexName);
         }
     }
 
     @SuppressWarnings("unchecked")
-    private void populateFromProperties(Map<String, Object> properties, String pathPrefix, String primaryFormat, boolean luceneAvailable) {
+    private void populateFromProperties(
+        Map<String, Object> properties,
+        String pathPrefix,
+        String primaryFormat,
+        boolean luceneAvailable,
+        Function<String, Optional<FieldValueTransformation>> transformations,
+        String indexName
+    ) {
         for (Map.Entry<String, Object> entry : properties.entrySet()) {
             String fieldName = pathPrefix.isEmpty() ? entry.getKey() : pathPrefix + "." + entry.getKey();
             Map<String, Object> fieldProps = (Map<String, Object>) entry.getValue();
             String fieldType = (String) fieldProps.get("type");
-            if (fieldType == null) {
-                // Implicit "object" type — OpenSearch infers it from presence of "properties".
-                // Recurse into the sub-mapping; object fields themselves have no storage.
+            if (fieldType == null || "object".equals(fieldType)) {
+                // Object mappings can either omit "type" or declare "type": "object" explicitly.
+                // Recurse into both forms; object fields themselves have no storage.
                 Map<String, Object> nested = (Map<String, Object>) fieldProps.get("properties");
                 if (nested != null) {
-                    populateFromProperties(nested, fieldName, primaryFormat, luceneAvailable);
+                    populateFromProperties(nested, fieldName, primaryFormat, luceneAvailable, transformations, indexName);
                     continue;
                 }
-                throw new IllegalStateException("Field [" + fieldName + "] has no type in mapping");
+                throw new IllegalStateException("Object field [" + fieldName + "] has no properties in mapping");
             }
-            this.fieldStorage.put(fieldName, resolveField(fieldName, fieldType, fieldProps, primaryFormat, luceneAvailable));
+            if ("nested".equals(fieldType)) {
+                // Nested sub-documents are not exposed as analytics columns yet; keep storage
+                // resolution aligned with OpenSearchSchemaBuilder. See
+                // https://github.com/opensearch-project/OpenSearch/issues/23030.
+                continue;
+            }
+            Optional<FieldValueTransformation> transformation = Objects.requireNonNull(
+                transformations.apply(fieldName),
+                "field value transformation resolver returned null for field [" + fieldName + "]"
+            );
+            if (transformation.isPresent() && "keyword".equals(fieldType) == false && "text".equals(fieldType) == false) {
+                throw new IllegalArgumentException(
+                    "Field value transformation for ["
+                        + indexName
+                        + "]["
+                        + fieldName
+                        + "] requires a string or keyword field but mapping type is ["
+                        + fieldType
+                        + "]"
+                );
+            }
+            this.fieldStorage.put(
+                fieldName,
+                resolveField(fieldName, fieldType, fieldProps, primaryFormat, luceneAvailable, transformation.isPresent())
+            );
         }
     }
 
@@ -110,7 +158,13 @@ public class FieldStorageResolver {
         Map<String, FieldStorageInfo> union = new HashMap<>();
         for (FieldStorageResolver resolver : perIndex) {
             for (Map.Entry<String, FieldStorageInfo> entry : resolver.fieldStorage.entrySet()) {
-                union.putIfAbsent(entry.getKey(), entry.getValue());
+                FieldStorageInfo existing = union.get(entry.getKey());
+                if (existing == null || (existing.isMasked() == false && entry.getValue().isMasked())) {
+                    // A table expression spanning several concrete indices is treated as masked
+                    // when any backing masks the field. This is the transformation equivalent of
+                    // the schema builder's fail-closed FLS intersection.
+                    union.put(entry.getKey(), entry.getValue());
+                }
             }
         }
         return new FieldStorageResolver(union);
@@ -134,7 +188,8 @@ public class FieldStorageResolver {
         String fieldType,
         Map<String, Object> fieldProps,
         String primaryFormat,
-        boolean luceneAvailable
+        boolean luceneAvailable,
+        boolean masked
     ) {
         // Doc values: present for all types unless explicitly disabled
         boolean hasDocValues = !Boolean.FALSE.equals(fieldProps.get("doc_values"));
@@ -162,7 +217,9 @@ public class FieldStorageResolver {
             indexFormats,
             storedFieldFormats,
             false,
-            exactMatchSubfieldOf(fieldType, fieldProps)
+            new java.util.LinkedHashSet<>(),
+            exactMatchSubfieldOf(fieldType, fieldProps),
+            masked
         );
     }
 

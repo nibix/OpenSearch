@@ -82,6 +82,11 @@ public class OpenSearchTableScanRule extends RelOptRule {
         List<String> delegationSupporters = registry.delegationSupporters(DelegationType.SCAN);
         List<String> delegationAcceptors = registry.delegationAcceptors(DelegationType.SCAN);
         List<String> viableBackends = new ArrayList<>(registry.scanCapableBackends());
+        if (fieldStorage.stream().anyMatch(FieldStorageInfo::isMasked)) {
+            // Only the DataFusion raw-read boundary applies MapperPlugin field-value
+            // transformations. Lucene scan/delegation would observe the original value.
+            viableBackends.retainAll(List.of("datafusion"));
+        }
 
         // Two-phase field coverage check:
         // 1. Value-producing backends (DocValues / StoredFields) must cover EVERY field —

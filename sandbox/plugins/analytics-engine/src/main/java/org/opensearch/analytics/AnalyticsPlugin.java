@@ -64,10 +64,12 @@ import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
+import org.opensearch.index.mapper.FieldValueTransformation;
 import org.opensearch.index.search.stats.SearchStats;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.ExtensiblePlugin;
 import org.opensearch.plugins.FieldFilterProvider;
+import org.opensearch.plugins.FieldValueTransformationProvider;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.PluginComponentRegistry;
 import org.opensearch.plugins.SearchStatsContributor;
@@ -87,6 +89,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -192,8 +195,15 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         Function<String, Predicate<String>> fieldFilter = pluginComponentRegistry.getComponent(FieldFilterProvider.class)
             .orElseThrow(() -> new IllegalStateException("FieldFilterProvider not available; it must be provided by the node"))
             .getFieldFilter();
+        Function<String, Function<String, Optional<FieldValueTransformation>>> fieldValueTransformations = pluginComponentRegistry
+            .getComponent(FieldValueTransformationProvider.class)
+            .map(FieldValueTransformationProvider::getFieldValueTransformations)
+            .orElse(FieldValueTransformationProvider.NOOP);
 
-        CapabilityRegistry capabilityRegistry = new CapabilityRegistry(backEnds, FieldStorageResolver::new);
+        CapabilityRegistry capabilityRegistry = new CapabilityRegistry(
+            backEnds,
+            indexMetadata -> new FieldStorageResolver(indexMetadata, fieldValueTransformations)
+        );
         QueryBuilderTranslationService queryBuilderTranslationService = new QueryBuilderTranslationService(queryBuilderTranslatorProviders);
         LogicalPlanDlsRewriter logicalPlanDlsRewriter = new LogicalPlanDlsRewriter(queryBuilderTranslationService);
 
@@ -211,7 +221,8 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             List.of(analyticsFragmentSlowLog),
             nativeAllocator,
             namedWriteableRegistry,
-            readerContextStore
+            readerContextStore,
+            fieldValueTransformations
         );
         searchService.setShuffleBufferRegistry(shuffleBufferManager);
         // Wire the node-level shuffle budget from settings (initial value + dynamic updates). The

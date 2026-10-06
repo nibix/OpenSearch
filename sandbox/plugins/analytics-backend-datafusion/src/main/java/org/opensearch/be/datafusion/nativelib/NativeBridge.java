@@ -522,6 +522,8 @@ public final class NativeBridge {
                 ValueLayout.JAVA_BYTE,   // deletedDocFilteringRequired (0/1)
                 ValueLayout.JAVA_BYTE,   // hasPartialAggregate (0/1)
                 ValueLayout.ADDRESS,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,     // field masking descriptors
                 ValueLayout.JAVA_LONG
             )
         );
@@ -542,7 +544,9 @@ public final class NativeBridge {
                 ValueLayout.JAVA_BYTE,   // hasPartialAggregate (0/1)
                 ValueLayout.JAVA_LONG,   // queryConfigPtr
                 ValueLayout.ADDRESS,     // planBytes (multi-index schema widening)
-                ValueLayout.JAVA_LONG    // planLen
+                ValueLayout.JAVA_LONG,   // planLen
+                ValueLayout.ADDRESS,     // field masking descriptors
+                ValueLayout.JAVA_LONG
             )
         );
 
@@ -720,6 +724,8 @@ public final class NativeBridge {
                 ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG,
                 ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,
+                ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG
             )
         );
@@ -1717,7 +1723,8 @@ public final class NativeBridge {
         boolean deletedDocFilteringRequired,
         boolean hasPartialAggregate,
         long queryConfigPtr,
-        byte[] planBytes
+        byte[] planBytes,
+        byte[] fieldMaskingBytes
     ) {
         NativeHandle.validatePointer(readerPtr, "reader");
         NativeHandle.validatePointer(runtimePtr, "runtime");
@@ -1726,6 +1733,9 @@ public final class NativeBridge {
             boolean hasPlan = planBytes != null && planBytes.length > 0;
             MemorySegment planSegment = hasPlan ? call.bytes(planBytes) : MemorySegment.NULL;
             long planLen = hasPlan ? planBytes.length : 0L;
+            boolean hasMasking = fieldMaskingBytes != null && fieldMaskingBytes.length > 0;
+            MemorySegment maskingSegment = hasMasking ? call.bytes(fieldMaskingBytes) : MemorySegment.NULL;
+            long maskingLen = hasMasking ? fieldMaskingBytes.length : 0L;
             long ptr = call.invoke(
                 CREATE_SESSION_CONTEXT,
                 readerPtr,
@@ -1737,7 +1747,9 @@ public final class NativeBridge {
                 (byte) (deletedDocFilteringRequired ? 1 : 0),
                 (byte) (hasPartialAggregate ? 1 : 0),
                 planSegment,
-                planLen
+                planLen,
+                maskingSegment,
+                maskingLen
             );
             return new SessionContextHandle(ptr);
         }
@@ -1780,7 +1792,8 @@ public final class NativeBridge {
         boolean deletedDocFilteringRequired,
         boolean hasPartialAggregate,
         long queryConfigPtr,
-        byte[] planBytes
+        byte[] planBytes,
+        byte[] fieldMaskingBytes
     ) {
         NativeHandle.validatePointer(readerPtr, "reader");
         NativeHandle.validatePointer(runtimePtr, "runtime");
@@ -1789,6 +1802,9 @@ public final class NativeBridge {
             boolean hasPlan = planBytes != null && planBytes.length > 0;
             MemorySegment planSegment = hasPlan ? call.bytes(planBytes) : MemorySegment.NULL;
             long planLen = hasPlan ? planBytes.length : 0L;
+            boolean hasMasking = fieldMaskingBytes != null && fieldMaskingBytes.length > 0;
+            MemorySegment maskingSegment = hasMasking ? call.bytes(fieldMaskingBytes) : MemorySegment.NULL;
+            long maskingLen = hasMasking ? fieldMaskingBytes.length : 0L;
             long ptr = call.invoke(
                 CREATE_SESSION_CONTEXT_INDEXED,
                 readerPtr,
@@ -1803,7 +1819,9 @@ public final class NativeBridge {
                 (byte) (hasPartialAggregate ? 1 : 0),
                 queryConfigPtr,
                 planSegment,
-                planLen
+                planLen,
+                maskingSegment,
+                maskingLen
             );
             return new SessionContextHandle(ptr);
         }
@@ -1926,7 +1944,8 @@ public final class NativeBridge {
         int rowIdsCount,
         String[] columns,
         long runtimePtr,
-        long contextId
+        long contextId,
+        byte[] fieldMaskingBytes
     ) {
         NativeHandle.validatePointer(readerPtr, "reader");
         NativeHandle.validatePointer(runtimePtr, "runtime");
@@ -1935,6 +1954,9 @@ public final class NativeBridge {
         }
         try (var call = new NativeCall()) {
             var colNames = call.strArray(columns);
+            boolean hasMasking = fieldMaskingBytes != null && fieldMaskingBytes.length > 0;
+            MemorySegment maskingSegment = hasMasking ? call.bytes(fieldMaskingBytes) : MemorySegment.NULL;
+            long maskingLen = hasMasking ? fieldMaskingBytes.length : 0L;
             return call.invoke(
                 FETCH_BY_ROW_IDS,
                 readerPtr,
@@ -1944,7 +1966,9 @@ public final class NativeBridge {
                 colNames.lens(),
                 colNames.count(),
                 runtimePtr,
-                contextId
+                contextId,
+                maskingSegment,
+                maskingLen
             );
         } catch (RuntimeException e) {
             throw rethrowConverted(e);

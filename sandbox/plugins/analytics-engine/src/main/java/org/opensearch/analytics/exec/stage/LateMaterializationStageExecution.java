@@ -230,7 +230,7 @@ public final class LateMaterializationStageExecution extends AbstractStageExecut
         this.transport = transport;
         this.shardStageId = shardStageId;
         this.fetchBackendId = fetchBackendId;
-        this.runner = new LocalTaskRunner(config.localTaskExecutor());
+        this.runner = new LocalTaskRunner(command -> config.localTaskExecutor().execute(config.preserveRequestContext(command)));
         this.wrapper = RelNodeUtils.findNode(stage.getFragment(), OpenSearchLateMaterialization.class);
         if (this.wrapper == null) {
             throw new IllegalStateException(

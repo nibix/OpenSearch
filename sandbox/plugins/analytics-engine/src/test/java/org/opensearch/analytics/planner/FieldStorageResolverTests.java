@@ -13,10 +13,13 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.MappingMetadata;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.index.Index;
+import org.opensearch.index.mapper.FieldValueTransformation;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
 
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -63,6 +66,50 @@ public class FieldStorageResolverTests extends OpenSearchTestCase {
         assertEquals("age", info.getFieldName());
         assertEquals(List.of("parquet"), info.getDocValueFormats());
         assertEquals(List.of("lucene"), info.getIndexFormats());
+    }
+
+    public void testStringTransformationMarksFieldMasked() {
+        FieldStorageResolver resolver = newResolver(
+            "parquet",
+            Map.of("secret", Map.of("type", "keyword")),
+            field -> Optional.of(new FieldValueTransformation.Hash(FieldValueTransformation.HashAlgorithm.SHA_256, new byte[0]))
+        );
+
+        assertTrue(resolver.resolve(List.of("secret")).getFirst().isMasked());
+    }
+
+    public void testTransformationOnUnsupportedMappingTypeFailsClosed() {
+        IllegalArgumentException exception = expectThrows(
+            IllegalArgumentException.class,
+            () -> newResolver(
+                "parquet",
+                Map.of("secret", Map.of("type", "long")),
+                field -> Optional.of(new FieldValueTransformation.Hash(FieldValueTransformation.HashAlgorithm.SHA_256, new byte[0]))
+            )
+        );
+
+        assertEquals(
+            "Field value transformation for [test_index][secret] requires a string or keyword field but mapping type is [long]",
+            exception.getMessage()
+        );
+    }
+
+    public void testObjectLeavesAreResolvedByDottedPathAndNestedMappingsAreIgnored() {
+        FieldStorageResolver resolver = newResolver(
+            "parquet",
+            Map.of(
+                "details",
+                Map.of("type", "object", "properties", Map.of("secret", Map.of("type", "keyword"))),
+                "events",
+                Map.of("type", "nested", "properties", Map.of("secret", Map.of("type", "keyword")))
+            )
+        );
+
+        assertEquals("details.secret", resolver.resolve(List.of("details.secret")).getFirst().getFieldName());
+        assertTrue(
+            expectThrows(IllegalArgumentException.class, () -> resolver.resolve(List.of("events.secret"))).getMessage()
+                .contains("not found")
+        );
     }
 
     public void testFieldWithAllStorageDisabledHasNoStorage() {
@@ -126,6 +173,14 @@ public class FieldStorageResolverTests extends OpenSearchTestCase {
     }
 
     private static FieldStorageResolver newResolver(String primaryFormat, Map<String, Map<String, Object>> fieldMappings) {
+        return newResolver(primaryFormat, fieldMappings, field -> Optional.empty());
+    }
+
+    private static FieldStorageResolver newResolver(
+        String primaryFormat,
+        Map<String, Map<String, Object>> fieldMappings,
+        Function<String, Optional<FieldValueTransformation>> transformations
+    ) {
         Map<String, Object> mappingSource = Map.of("properties", fieldMappings);
 
         MappingMetadata mappingMetadata = mock(MappingMetadata.class);
@@ -141,6 +196,6 @@ public class FieldStorageResolverTests extends OpenSearchTestCase {
         );
         when(indexMetadata.mapping()).thenReturn(mappingMetadata);
 
-        return new FieldStorageResolver(indexMetadata);
+        return new FieldStorageResolver(indexMetadata, index -> transformations);
     }
 }

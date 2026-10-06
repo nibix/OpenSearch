@@ -2340,6 +2340,7 @@ public class IndicesService extends AbstractLifecycleComponent
         return mapperRegistry.getFieldFilter();
     }
 
+    /** Returns the node's request-context-aware field-value transformation resolver. */
     /**
      * Returns true if the provided field is a registered metadata field (including ones registered via plugins), false otherwise.
      */

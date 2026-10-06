@@ -225,6 +225,7 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode,
         // (preserving first-seen order across argList, then rexList).
         for (AggregateCall aggCall : getAggCallList()) {
             LinkedHashSet<String> deps = new LinkedHashSet<>();
+            boolean masked = false;
             for (int argIdx : aggCall.getArgList()) {
                 if (argIdx >= inputStorage.size()) {
                     throw new IllegalStateException(
@@ -237,6 +238,7 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode,
                     );
                 }
                 FieldStorageInfo src = inputStorage.get(argIdx);
+                masked |= src.isMasked();
                 if (src.isDerived()) {
                     deps.addAll(src.getDependsOnPhysicalCols());
                 } else {
@@ -246,7 +248,7 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode,
             for (RexNode rex : aggCall.rexList) {
                 deps.addAll(RelNodeUtils.resolvePhysicalDeps(rex, inputStorage));
             }
-            outputStorage.add(FieldStorageInfo.derivedColumn(aggCall.getName(), aggCall.getType().getSqlTypeName(), deps));
+            outputStorage.add(FieldStorageInfo.derivedColumn(aggCall.getName(), aggCall.getType().getSqlTypeName(), deps, masked));
         }
 
         return outputStorage;

@@ -53,16 +53,25 @@ import org.opensearch.core.tasks.TaskCancelledException;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.engine.exec.IndexReaderProvider;
 import org.opensearch.index.engine.exec.IndexReaderProvider.Reader;
+import org.opensearch.index.mapper.FieldValueTransformation;
+import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.shard.IndexShard;
+import org.opensearch.plugins.FieldValueTransformationProvider;
 import org.opensearch.tasks.Task;
 import org.opensearch.tasks.TaskResourceTrackingService;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.function.Function;
 
 /**
  * Data-node service that executes plan fragments against local shards.
@@ -111,9 +120,10 @@ public class AnalyticsSearchService implements AutoCloseable {
      */
     private final BufferAllocator importStagingAllocator;
     private final ArrowNativeAllocator nativeAllocator;
+    private final Function<String, Function<String, Optional<FieldValueTransformation>>> fieldValueTransformations;
 
     public AnalyticsSearchService(Map<String, AnalyticsSearchBackendPlugin> backends, ArrowNativeAllocator nativeAllocator) {
-        this(backends, List.of(), nativeAllocator, null, null);
+        this(backends, List.of(), nativeAllocator, null, null, FieldValueTransformationProvider.NOOP);
     }
 
     public AnalyticsSearchService(
@@ -122,7 +132,7 @@ public class AnalyticsSearchService implements AutoCloseable {
         NamedWriteableRegistry namedWriteableRegistry,
         ReaderContextStore readerContextStore
     ) {
-        this(backends, List.of(), nativeAllocator, namedWriteableRegistry, readerContextStore);
+        this(backends, List.of(), nativeAllocator, namedWriteableRegistry, readerContextStore, FieldValueTransformationProvider.NOOP);
     }
 
     public AnalyticsSearchService(
@@ -130,7 +140,8 @@ public class AnalyticsSearchService implements AutoCloseable {
         List<AnalyticsOperationListener> listeners,
         ArrowNativeAllocator nativeAllocator,
         NamedWriteableRegistry namedWriteableRegistry,
-        ReaderContextStore readerContextStore
+        ReaderContextStore readerContextStore,
+        Function<String, Function<String, Optional<FieldValueTransformation>>> fieldValueTransformations
     ) {
         this.backends = backends;
         this.listener = new AnalyticsOperationListener.CompositeListener(listeners);
@@ -151,6 +162,7 @@ public class AnalyticsSearchService implements AutoCloseable {
         this.importStagingAllocator = allocator.getRoot().newChildAllocator("arrow-import-staging", 0, Long.MAX_VALUE);
         this.namedWriteableRegistry = namedWriteableRegistry;
         this.readerContextStore = readerContextStore;
+        this.fieldValueTransformations = Objects.requireNonNull(fieldValueTransformations, "fieldValueTransformations");
     }
 
     @Override
@@ -754,6 +766,7 @@ public class AnalyticsSearchService implements AutoCloseable {
                 readerContext.getReader(),
                 rowIdVector,
                 columns,
+                resolveFieldValueTransformations(shard.mapperService(), shard.shardId().getIndexName(), new HashSet<>(List.of(columns))),
                 allocator,
                 task.getNativeTaskId(),
                 importStagingAllocator
@@ -1153,7 +1166,45 @@ public class AnalyticsSearchService implements AutoCloseable {
         ctx.setQueryCache(shard.getQueryCache());
         ctx.setQueryCachingPolicy(shard.getQueryCachingPolicy());
         ctx.setShardId(shard.shardId());
+        ctx.setFieldValueTransformations(resolveFieldValueTransformations(shard.mapperService(), tableName, null));
         return ctx;
+    }
+
+    private Map<String, FieldValueTransformation> resolveFieldValueTransformations(
+        org.opensearch.index.mapper.MapperService mapperService,
+        String concreteIndex,
+        Set<String> requestedFields
+    ) {
+        Function<String, Optional<FieldValueTransformation>> perField = Objects.requireNonNull(
+            fieldValueTransformations.apply(concreteIndex),
+            "field value transformation resolver returned null for index [" + concreteIndex + "]"
+        );
+        Map<String, FieldValueTransformation> resolved = new LinkedHashMap<>();
+        for (MappedFieldType mappedField : mapperService.fieldTypes()) {
+            if (requestedFields != null && requestedFields.contains(mappedField.name()) == false) {
+                continue;
+            }
+            Optional<FieldValueTransformation> transformation = Objects.requireNonNull(
+                perField.apply(mappedField.name()),
+                "field value transformation resolver returned null for field [" + mappedField.name() + "]"
+            );
+            if (transformation.isEmpty()) {
+                continue;
+            }
+            if ("keyword".equals(mappedField.typeName()) == false && "text".equals(mappedField.typeName()) == false) {
+                throw new IllegalArgumentException(
+                    "Field value transformation for ["
+                        + concreteIndex
+                        + "]["
+                        + mappedField.name()
+                        + "] requires a string or keyword field but mapping type is ["
+                        + mappedField.typeName()
+                        + "]"
+                );
+            }
+            resolved.put(mappedField.name(), transformation.get());
+        }
+        return resolved;
     }
 
     // ── Assertion helpers (invoked only when -ea is enabled; bodies are dead in production) ──

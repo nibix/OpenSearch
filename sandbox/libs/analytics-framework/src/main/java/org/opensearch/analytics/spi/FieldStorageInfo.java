@@ -29,6 +29,7 @@ public class FieldStorageInfo {
     private final List<String> indexFormats;
     private final List<String> storedFieldFormats;
     private final boolean derived;
+    private final boolean masked;
     private final LinkedHashSet<String> dependsOnPhysicalCols;
     /**
      * Subfield to target for exact-match (term) predicates — e.g. a text field's keyword
@@ -47,7 +48,18 @@ public class FieldStorageInfo {
     ) {
         // Default: no physical-col dependencies. Physical fields aren't "derived from"
         // anything; derived fields' deps are supplied by the caller via the 8-arg ctor.
-        this(fieldName, mappingType, fieldType, docValueFormats, indexFormats, storedFieldFormats, derived, new LinkedHashSet<>());
+        this(
+            fieldName,
+            mappingType,
+            fieldType,
+            docValueFormats,
+            indexFormats,
+            storedFieldFormats,
+            derived,
+            new LinkedHashSet<>(),
+            null,
+            false
+        );
     }
 
     /** Physical-field ctor with an explicit exact-match subfield name (or {@code null} if none). */
@@ -70,7 +82,8 @@ public class FieldStorageInfo {
             storedFieldFormats,
             derived,
             new LinkedHashSet<>(),
-            exactMatchSubfield
+            exactMatchSubfield,
+            false
         );
     }
 
@@ -84,7 +97,18 @@ public class FieldStorageInfo {
         boolean derived,
         LinkedHashSet<String> dependsOnPhysicalCols
     ) {
-        this(fieldName, mappingType, fieldType, docValueFormats, indexFormats, storedFieldFormats, derived, dependsOnPhysicalCols, null);
+        this(
+            fieldName,
+            mappingType,
+            fieldType,
+            docValueFormats,
+            indexFormats,
+            storedFieldFormats,
+            derived,
+            dependsOnPhysicalCols,
+            null,
+            false
+        );
     }
 
     public FieldStorageInfo(
@@ -98,6 +122,32 @@ public class FieldStorageInfo {
         LinkedHashSet<String> dependsOnPhysicalCols,
         String exactMatchSubfield
     ) {
+        this(
+            fieldName,
+            mappingType,
+            fieldType,
+            docValueFormats,
+            indexFormats,
+            storedFieldFormats,
+            derived,
+            dependsOnPhysicalCols,
+            exactMatchSubfield,
+            false
+        );
+    }
+
+    public FieldStorageInfo(
+        String fieldName,
+        String mappingType,
+        FieldType fieldType,
+        List<String> docValueFormats,
+        List<String> indexFormats,
+        List<String> storedFieldFormats,
+        boolean derived,
+        LinkedHashSet<String> dependsOnPhysicalCols,
+        String exactMatchSubfield,
+        boolean masked
+    ) {
         this.fieldName = fieldName;
         this.mappingType = mappingType;
         this.fieldType = fieldType;
@@ -105,6 +155,7 @@ public class FieldStorageInfo {
         this.indexFormats = indexFormats;
         this.storedFieldFormats = storedFieldFormats;
         this.derived = derived;
+        this.masked = masked;
         this.dependsOnPhysicalCols = dependsOnPhysicalCols;
         this.exactMatchSubfield = exactMatchSubfield;
     }
@@ -121,6 +172,16 @@ public class FieldStorageInfo {
      *  first-appearance order. {@link LinkedHashSet} makes both the ordering invariant
      *  and the no-duplicates invariant explicit at the type level. */
     public static FieldStorageInfo derivedColumn(String fieldName, SqlTypeName sqlTypeName, LinkedHashSet<String> dependsOnPhysicalCols) {
+        return derivedColumn(fieldName, sqlTypeName, dependsOnPhysicalCols, false);
+    }
+
+    /** Creates a derived column while preserving whether any input value was masked. */
+    public static FieldStorageInfo derivedColumn(
+        String fieldName,
+        SqlTypeName sqlTypeName,
+        LinkedHashSet<String> dependsOnPhysicalCols,
+        boolean masked
+    ) {
         return new FieldStorageInfo(
             fieldName,
             sqlTypeName.getName(),
@@ -129,7 +190,9 @@ public class FieldStorageInfo {
             List.of(),
             List.of(),
             true,
-            dependsOnPhysicalCols
+            dependsOnPhysicalCols,
+            null,
+            masked
         );
     }
 
@@ -164,6 +227,11 @@ public class FieldStorageInfo {
     /** True for computed columns (agg results, expressions) with no physical storage. */
     public boolean isDerived() {
         return derived;
+    }
+
+    /** Whether this value contains or is derived from a field whose values are masked. */
+    public boolean isMasked() {
+        return masked;
     }
 
     /**

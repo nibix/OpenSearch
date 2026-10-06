@@ -1077,6 +1077,7 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         Reader reader,
         BigIntVector rowIdVector,
         String[] columns,
+        Map<String, org.opensearch.index.mapper.FieldValueTransformation> fieldValueTransformations,
         BufferAllocator allocator,
         long contextId,
         BufferAllocator importStagingAllocator
@@ -1109,7 +1110,8 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                 count,
                 columns,
                 dataFusionService.getNativeRuntime().get(),
-                contextId
+                contextId,
+                FieldMaskingWireCodec.encode(fieldValueTransformations)
             );
         } else {
             throw new IllegalStateException("BigIntVector buffer address is 0 or count is 0");

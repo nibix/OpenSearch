@@ -442,6 +442,8 @@ pub unsafe extern "C" fn df_fetch_by_row_ids(
     col_names_count: i64,
     runtime_ptr: i64,
     context_id: i64,
+    masking_ptr: *const u8,
+    masking_len: i64,
 ) -> i64 {
     // Hard FFM-boundary checks (UB risk if violated): pointers must be non-zero before any deref.
     // Always-on `assert!` (not debug_assert!) — these protect against use-after-close from Java.
@@ -479,10 +481,24 @@ pub unsafe extern "C" fn df_fetch_by_row_ids(
             col_names_count
         );
     }
+    assert!(
+        masking_len >= 0,
+        "df_fetch_by_row_ids: negative masking_len {masking_len}"
+    );
 
     let mgr = get_rt_manager()?;
     let shard_view = &*(shard_view_ptr as *const crate::api::ShardView);
     let runtime = &*(runtime_ptr as *const crate::api::DataFusionRuntime);
+    let masking_bytes = if masking_len > 0 {
+        assert!(
+            !masking_ptr.is_null(),
+            "df_fetch_by_row_ids: null masking pointer"
+        );
+        slice::from_raw_parts(masking_ptr, masking_len as usize)
+    } else {
+        &[]
+    };
+    let transformations = crate::masking::decode(masking_bytes).map_err(|e| e.to_string())?;
 
     // Zero-copy read from BigIntVector's direct buffer
     let row_ids: Vec<i64> =
@@ -500,7 +516,13 @@ pub unsafe extern "C" fn df_fetch_by_row_ids(
 
     mgr.io_runtime
         .block_on(crate::api::fetch_by_row_ids(
-            shard_view, runtime, &mgr, row_ids, columns, context_id,
+            shard_view,
+            runtime,
+            &mgr,
+            row_ids,
+            columns,
+            context_id,
+            transformations,
         ))
         .map_err(|e| e.to_string())
 }
@@ -1252,6 +1274,8 @@ pub unsafe extern "C" fn df_create_session_context(
     has_partial_aggregate: u8,
     plan_ptr: *const u8,
     plan_len: i64,
+    masking_ptr: *const u8,
+    masking_len: i64,
 ) -> i64 {
     crate::search_stats::inc_listing_table_scan();
     let table_name = str_from_raw(table_name_ptr, table_name_len)
@@ -1263,6 +1287,20 @@ pub unsafe extern "C" fn df_create_session_context(
     } else {
         &[]
     };
+    assert!(
+        masking_len >= 0,
+        "df_create_session_context: negative masking_len {masking_len}"
+    );
+    let masking_bytes: &[u8] = if masking_len > 0 {
+        assert!(
+            !masking_ptr.is_null(),
+            "df_create_session_context: null masking pointer"
+        );
+        slice::from_raw_parts(masking_ptr, masking_len as usize)
+    } else {
+        &[]
+    };
+    let transformations = crate::masking::decode(masking_bytes).map_err(|e| e.to_string())?;
     let mgr = get_rt_manager()?;
     mgr.io_runtime
         .block_on(crate::task_monitors::plan_setup_monitor().instrument(
@@ -1275,6 +1313,7 @@ pub unsafe extern "C" fn df_create_session_context(
                 has_partial_aggregate != 0,
                 query_config,
                 plan_bytes,
+                transformations,
             ),
         ))
         .map_err(|e| e.to_string())
@@ -1317,6 +1356,8 @@ pub unsafe extern "C" fn df_create_session_context_indexed(
     query_config_ptr: i64,
     plan_ptr: *const u8,
     plan_len: i64,
+    masking_ptr: *const u8,
+    masking_len: i64,
 ) -> i64 {
     match tree_shape {
         1 => crate::search_stats::inc_single_collector_scan(),
@@ -1332,6 +1373,20 @@ pub unsafe extern "C" fn df_create_session_context_indexed(
     } else {
         &[]
     };
+    assert!(
+        masking_len >= 0,
+        "df_create_session_context_indexed: negative masking_len {masking_len}"
+    );
+    let masking_bytes: &[u8] = if masking_len > 0 {
+        assert!(
+            !masking_ptr.is_null(),
+            "df_create_session_context_indexed: null masking pointer"
+        );
+        slice::from_raw_parts(masking_ptr, masking_len as usize)
+    } else {
+        &[]
+    };
+    let transformations = crate::masking::decode(masking_bytes).map_err(|e| e.to_string())?;
     let mgr = get_rt_manager()?;
     mgr.io_runtime
         .block_on(crate::task_monitors::plan_setup_monitor().instrument(
@@ -1347,6 +1402,7 @@ pub unsafe extern "C" fn df_create_session_context_indexed(
                 has_partial_aggregate != 0,
                 query_config,
                 plan_bytes,
+                transformations,
             ),
         ))
         .map_err(|e| e.to_string())

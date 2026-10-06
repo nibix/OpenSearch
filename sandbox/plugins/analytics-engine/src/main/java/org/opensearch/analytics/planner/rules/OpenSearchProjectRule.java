@@ -25,6 +25,7 @@ import org.opensearch.analytics.planner.rel.AnnotatedProjectExpression;
 import org.opensearch.analytics.planner.rel.OpenSearchProject;
 import org.opensearch.analytics.planner.rel.OpenSearchRelNode;
 import org.opensearch.analytics.spi.DelegationType;
+import org.opensearch.analytics.spi.FieldStorageInfo;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.ScalarFunction;
 import org.opensearch.analytics.spi.WindowCapability;
@@ -66,6 +67,7 @@ public class OpenSearchProjectRule extends RelOptRule {
         }
 
         List<String> childViableBackends = openSearchChild.getViableBackends();
+        rejectMaskedWindowReferences(project.getProjects(), openSearchChild.getOutputFieldStorage());
 
         // Note: if JMH benchmarks show this as a hotspot, consider (a) precomputing a
         // SqlKind → viable backends map once per onMatch() call, and (b) returning
@@ -109,6 +111,34 @@ public class OpenSearchProjectRule extends RelOptRule {
                 viableBackends
             )
         );
+    }
+
+    private static void rejectMaskedWindowReferences(List<? extends RexNode> expressions, List<FieldStorageInfo> fields) {
+        for (RexNode expression : expressions) {
+            final boolean[] containsWindow = new boolean[1];
+            expression.accept(new org.apache.calcite.rex.RexShuttle() {
+                @Override
+                public RexNode visitOver(RexOver over) {
+                    containsWindow[0] = true;
+                    return super.visitOver(over);
+                }
+            });
+            if (containsWindow[0] == false) {
+                continue;
+            }
+            expression.accept(new org.apache.calcite.rex.RexShuttle() {
+                @Override
+                public RexNode visitInputRef(RexInputRef inputRef) {
+                    FieldStorageInfo field = FieldStorageInfo.resolve(fields, inputRef.getIndex());
+                    if (field.isMasked()) {
+                        throw new IllegalArgumentException(
+                            "Window functions are not supported for masked field [" + field.getFieldName() + "]"
+                        );
+                    }
+                    return inputRef;
+                }
+            });
+        }
     }
 
     private RexNode annotateExpr(RexNode expr, List<String> childViableBackends) {

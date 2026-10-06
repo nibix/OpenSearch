@@ -17,6 +17,7 @@ import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.ShardExecutionTarget;
 import org.opensearch.analytics.settings.AnalyticsQuerySettings;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.util.List;
@@ -25,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 
 /**
  * Per-query context — immutable config (DAG, executor, parent task) + lazy per-query
@@ -88,8 +90,13 @@ public class QueryContext {
     private final Map<Integer, Map<Integer, ShardExecutionTarget>> resolvedTargetsByStage = new ConcurrentHashMap<>();
 
     private static final class SharedState {
+        final Supplier<ThreadContext.StoredContext> requestContext;
         volatile ExecutorService localTaskExecutor;
         boolean executorClosed;  // guarded by synchronized(this)
+
+        SharedState(ThreadPool threadPool) {
+            requestContext = threadPool == null ? null : threadPool.getThreadContext().newRestorableContext(false);
+        }
     }
 
     public QueryContext(
@@ -111,7 +118,7 @@ public class QueryContext {
             allocator,
             ownsAllocator,
             /* profile */ false,
-            new SharedState()
+            new SharedState(threadPool)
         );
     }
 
@@ -135,7 +142,7 @@ public class QueryContext {
             allocator,
             ownsAllocator,
             /* profile */ false,
-            new SharedState()
+            new SharedState(threadPool)
         );
     }
 
@@ -165,7 +172,7 @@ public class QueryContext {
             allocator,
             ownsAllocator,
             profile,
-            new SharedState()
+            new SharedState(threadPool)
         );
     }
 
@@ -352,6 +359,24 @@ public class QueryContext {
         return exec;
     }
 
+    /**
+     * Wraps work with the request thread context captured when this query context was created.
+     * Local stages can start from asynchronous completion callbacks, including virtual threads
+     * that do not carry OpenSearch thread context. Restoring the originating request context
+     * ensures any transport request they dispatch propagates the authenticated request headers.
+     */
+    public Runnable preserveRequestContext(Runnable command) {
+        Supplier<ThreadContext.StoredContext> requestContext = sharedState.requestContext;
+        if (requestContext == null) {
+            return command;
+        }
+        return () -> {
+            try (ThreadContext.StoredContext ignored = requestContext.get()) {
+                command.run();
+            }
+        };
+    }
+
     boolean ownsAllocator() {
         return ownsAllocator;
     }
@@ -424,7 +449,7 @@ public class QueryContext {
             testAllocator,
             true,
             /* profile */ false,
-            new SharedState()
+            new SharedState(null)
         );
     }
 }

@@ -89,6 +89,8 @@ fancy-regex = "=0.14.0"
 # IEEE 802.3 CRC-32 implementation used by `crc32`; also pulled in via workspace
 # for parquet metadata (`crc32fast = "1.4"`) so adding it here is a zero-cost alias.
 sha1 = "0.11"
+sha2 = "0.10.9"
+blake2b_simd = "1.0.4"
 crc32fast = { workspace = true }
 
 # `base64` for the binary_to_base64 UDF — output of CAST(<BinaryType> AS VARCHAR)

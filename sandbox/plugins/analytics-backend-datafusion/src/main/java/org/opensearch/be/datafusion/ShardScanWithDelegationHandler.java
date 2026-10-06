@@ -85,7 +85,8 @@ public class ShardScanWithDelegationHandler implements FragmentInstructionHandle
                 context.hasDeletedDocs(),
                 context.hasPartialAggregate(),
                 segment.address(),
-                context.getFragmentBytes()
+                context.getFragmentBytes(),
+                FieldMaskingWireCodec.encode(context.getFieldValueTransformations())
             );
             return new DataFusionSessionState(sessionCtxHandle);
         }

@@ -106,7 +106,17 @@ public class OpenSearchProject extends Project implements OpenSearchRelNode, Dis
             } else {
                 String fieldName = getRowType().getFieldList().get(i).getName();
                 LinkedHashSet<String> deps = RelNodeUtils.resolvePhysicalDeps(expr, inputStorage);
-                result.add(FieldStorageInfo.derivedColumn(fieldName, getRowType().getFieldList().get(i).getType().getSqlTypeName(), deps));
+                boolean masked = deps.stream()
+                    .anyMatch(
+                        dep -> inputStorage.stream()
+                            .anyMatch(
+                                info -> info.isMasked()
+                                    && (info.getFieldName().equals(dep) || info.getDependsOnPhysicalCols().contains(dep))
+                            )
+                    );
+                result.add(
+                    FieldStorageInfo.derivedColumn(fieldName, getRowType().getFieldList().get(i).getType().getSqlTypeName(), deps, masked)
+                );
             }
         }
         return result;
