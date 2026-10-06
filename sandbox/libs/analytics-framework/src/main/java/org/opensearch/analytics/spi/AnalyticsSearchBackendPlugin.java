@@ -14,6 +14,7 @@ import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.ShardScanExecutionContext;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.index.engine.exec.IndexReaderProvider.Reader;
+import org.opensearch.index.mapper.FieldValueTransformation;
 import org.opensearch.index.shard.IndexShard;
 
 import java.util.Collections;
@@ -220,6 +221,8 @@ public interface AnalyticsSearchBackendPlugin {
      * @param reader the index reader for the target shard
      * @param rowIdVector Arrow BigIntVector containing global row IDs
      * @param columns column names to read
+     * @param fieldValueTransformations transformations keyed by full mapped field name that must be applied to the corresponding raw
+     *        field values before they are returned
      * @param allocator Arrow buffer allocator for result import
      * @param importStagingAllocator node-scoped allocator to stage Arrow C Data imports on; see
      *        {@link org.opensearch.analytics.backend.ShardScanExecutionContext#getImportStagingAllocator()}
@@ -229,6 +232,7 @@ public interface AnalyticsSearchBackendPlugin {
         Reader reader,
         BigIntVector rowIdVector,
         String[] columns,
+        Map<String, FieldValueTransformation> fieldValueTransformations,
         BufferAllocator allocator,
         long contextId,
         BufferAllocator importStagingAllocator

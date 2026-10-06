@@ -145,6 +145,7 @@ pub async fn execute_indexed_query(
         has_topk: false,
         prepared_plan: None,
         phantom_reservation: None,
+        field_value_transformations: Arc::new(std::collections::HashMap::new()),
     };
     let ptr = Box::into_raw(Box::new(handle)) as i64;
 
@@ -1139,6 +1140,35 @@ async unsafe fn execute_indexed_with_context_inner(
     let sort_orders = handle.sort_orders;
     let query_context = handle.query_context;
     let io_handle = handle.io_handle;
+    let field_value_transformations = handle.field_value_transformations;
+    // `index.sort.*` describes the order of the raw values stored in parquet. A field-value
+    // transformation is not necessarily order-preserving: hashes replace the ordering entirely,
+    // and even a regex replacement can reorder equal/prefix-related strings. Therefore, if any
+    // key in the declared lexicographic ordering is masked, that ordering cannot describe the
+    // rows emitted by MaskingExec. Advertising it could let DataFusion remove or weaken the Sort
+    // above MaskingExec and produce incorrect ORDER BY or ORDER BY ... LIMIT results.
+    //
+    // Clearing both vectors makes the indexed scan behave as unsorted. In particular, it does not
+    // compute leading-key segment bounds, reverse segment iteration, choose the one-segment-per-
+    // partition sort-aware layout, advertise a LexOrdering, or use raw sort statistics for indexed
+    // TopK pruning. DataFusion consequently retains the authoritative Sort above MaskingExec and
+    // sorts the transformed values. These plan changes are guaranteed. Their resource impact is
+    // conditional: a query that would otherwise qualify for the sort-aware path loses its ordering
+    // and pruning shortcuts and can therefore read more row groups and spend more CPU and memory on
+    // sorting, especially with LIMIT; a query that would not qualify incurs no additional cost from
+    // disabling those already-inapplicable optimizations.
+    //
+    // Dropping the whole ordering is conservative: an unmasked prefix before the first masked key
+    // could in principle still be advertised, but this implementation does not retain partial
+    // index-sort metadata.
+    let masking_invalidates_index_sort = sort_fields
+        .iter()
+        .any(|field| field_value_transformations.contains_key(field));
+    let (effective_sort_fields, effective_sort_orders) = if masking_invalidates_index_sort {
+        (Vec::new(), Vec::new())
+    } else {
+        (sort_fields, sort_orders)
+    };
     // Extract context_id early so it can be captured by the per-segment closures
     // below. The closures pass it through every FFM upcall so Java can route each
     // callback to the correct per-query FilterDelegationHandle and DelegationThreadTracker.
@@ -1169,7 +1199,7 @@ async unsafe fn execute_indexed_with_context_inner(
         object_metas.as_ref(),
         writer_generations.as_ref(),
         metadata_cache,
-        &sort_fields,
+        &effective_sort_fields,
     )
     .await
     .map_err(DataFusionError::Execution)?;
@@ -1203,20 +1233,26 @@ async unsafe fn execute_indexed_with_context_inner(
     let mut segments = segments;
     if should_reverse_segments(
         analyze_top_sort(&logical_plan).as_ref(),
-        &sort_fields,
-        &sort_orders,
+        &effective_sort_fields,
+        &effective_sort_orders,
     ) {
         log_debug!(
             "indexed_executor: reversing segment iteration (catalog leading sort={:?} {:?}, query opposite)",
-            sort_fields.first(),
-            sort_orders.first()
+            effective_sort_fields.first(),
+            effective_sort_orders.first()
         );
         reverse_segment_iteration_order(&mut segments);
     }
 
     let emit_row_ids = requests_row_ids;
     let filter_expr = extract_filter_expr(&logical_plan);
+    let filter_references_masked = filter_expr.as_ref().is_some_and(|expr| {
+        expr.column_refs()
+            .iter()
+            .any(|column| field_value_transformations.contains_key(&column.name))
+    });
     let extraction = match filter_expr {
+        Some(_) if filter_references_masked => None,
         None => None,
         Some(ref expr) => Some(
             expr_to_bool_tree(expr, &schema, &state)
@@ -1643,10 +1679,12 @@ async unsafe fn execute_indexed_with_context_inner(
         predicate_columns,
         emit_row_ids,
         prune_tree_config,
-        sort_fields: sort_fields.clone(),
-        sort_orders: sort_orders.clone(),
+        sort_fields: effective_sort_fields,
+        sort_orders: effective_sort_orders,
         cancellation_token: crate::query_tracker::get_cancellation_token(context_id),
     }));
+    let provider =
+        crate::masking::MaskingTableProvider::wrap(provider, field_value_transformations);
     ctx.register_table(&register_name, provider)?;
 
     let logical_plan = crate::substrait_consumer::from_substrait_plan(&ctx.state(), &plan).await?;
