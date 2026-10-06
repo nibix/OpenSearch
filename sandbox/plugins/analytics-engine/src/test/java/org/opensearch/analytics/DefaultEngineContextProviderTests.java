@@ -15,6 +15,7 @@ import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.plugins.MapperPlugin;
 import org.opensearch.test.OpenSearchTestCase;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -51,6 +52,7 @@ public class DefaultEngineContextProviderTests extends OpenSearchTestCase {
         AnalyticsPlugin.DefaultEngineContextProvider ctx = new AnalyticsPlugin.DefaultEngineContextProvider(
             clusterService,
             injectedResolver,
+            MapperPlugin.NOOP_FIELD_FILTER,
             null
         );
 

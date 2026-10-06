@@ -67,6 +67,7 @@ import org.opensearch.env.NodeEnvironment;
 import org.opensearch.index.search.stats.SearchStats;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.ExtensiblePlugin;
+import org.opensearch.plugins.FieldFilterProvider;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.PluginComponentRegistry;
 import org.opensearch.plugins.SearchStatsContributor;
@@ -86,6 +87,8 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /**
@@ -186,6 +189,9 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     ) {
         ArrowNativeAllocator nativeAllocator = pluginComponentRegistry.getComponent(ArrowNativeAllocator.class)
             .orElseThrow(() -> new IllegalStateException("ArrowNativeAllocator not available; arrow-base plugin must be installed"));
+        Function<String, Predicate<String>> fieldFilter = pluginComponentRegistry.getComponent(FieldFilterProvider.class)
+            .orElseThrow(() -> new IllegalStateException("FieldFilterProvider not available; it must be provided by the node"))
+            .getFieldFilter();
 
         CapabilityRegistry capabilityRegistry = new CapabilityRegistry(backEnds, FieldStorageResolver::new);
         QueryBuilderTranslationService queryBuilderTranslationService = new QueryBuilderTranslationService(queryBuilderTranslatorProviders);
@@ -227,7 +233,12 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         cs.addSettingsUpdateConsumer(AnalyticsSettings.MPP_SHUFFLE_SPILL_DIRECTORY, dir -> applyShuffleSpillConfig(cs));
         cs.addSettingsUpdateConsumer(AnalyticsSettings.MPP_SHUFFLE_SPILL_MAX_BYTES, max -> applyShuffleSpillConfig(cs));
         searchService.setShuffleSenderDeps(client, threadPool, clusterService);
-        DefaultEngineContextProvider ctx = new DefaultEngineContextProvider(clusterService, indexNameExpressionResolver, backEndsByName);
+        DefaultEngineContextProvider ctx = new DefaultEngineContextProvider(
+            clusterService,
+            indexNameExpressionResolver,
+            fieldFilter,
+            backEndsByName
+        );
         // Build the coordinator allocator under POOL_QUERY here, in the plugin, so that the
         // plugin's lifecycle owns its lifetime. The Guice-bound DefaultPlanExecutor consumes
         // it via the handle without taking on close responsibility — mirroring how
@@ -417,13 +428,13 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
      * system-index access checks, and ThreadContext threading. Building schemas with a fresh
      * resolver would silently bypass those checks.
      */
-    record DefaultEngineContextProvider(ClusterService clusterService, IndexNameExpressionResolver indexNameExpressionResolver, Map<
+    record DefaultEngineContextProvider(ClusterService clusterService, IndexNameExpressionResolver indexNameExpressionResolver, Function<
         String,
-        AnalyticsSearchBackendPlugin> backends) implements EngineContextProvider {
+        Predicate<String>> fieldFilter, Map<String, AnalyticsSearchBackendPlugin> backends) implements EngineContextProvider {
 
         @Override
         public QueryRequestContext getContext(ClusterState clusterState) {
-            SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState, indexNameExpressionResolver);
+            SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState, indexNameExpressionResolver, fieldFilter);
             return new QueryRequestContext(clusterState, schema);
         }
 
