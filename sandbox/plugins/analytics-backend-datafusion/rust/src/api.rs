@@ -1028,6 +1028,7 @@ pub async unsafe fn fetch_by_row_ids(
     row_ids: Vec<i64>,
     columns: Vec<String>,
     context_id: i64,
+    field_value_transformations: crate::masking::Transformations,
 ) -> Result<i64, DataFusionError> {
     use crate::indexed_table::row_selection::build_row_selection_with_min_skip_run;
     use crate::indexed_table::segment_info::build_segments;
@@ -1143,6 +1144,8 @@ pub async unsafe fn fetch_by_row_ids(
         files,
         store_url,
     }));
+    let provider =
+        crate::masking::MaskingTableProvider::wrap(provider, field_value_transformations);
     ctx.register_table("t", provider)?;
 
     // ── 4. Execute SQL: compute global __row_id__ = __row_id__ + row_base ──

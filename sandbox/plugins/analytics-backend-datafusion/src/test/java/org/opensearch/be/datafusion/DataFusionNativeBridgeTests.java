@@ -117,6 +117,7 @@ public class DataFusionNativeBridgeTests extends OpenSearchTestCase {
             false,
             false,
             queryConfigPtr,
+            new byte[0],
             new byte[0]
         );
         arena.close();

@@ -25,7 +25,9 @@ import java.lang.foreign.MemorySegment;
  * Handles ShardScanWithDelegation instruction: creates a SessionContext via FFM
  * configured for indexed execution — registers the delegated_predicate UDF and
  * sets up the custom scan operator (IndexedTableProvider) with FilterTreeShape
- * and delegatedPredicateCount.
+ * and delegatedPredicateCount. Locally resolved field transformations cross the Java-to-Rust
+ * boundary using the private format defined by {@link FieldMaskingFfmCodec}; they are not part of
+ * node-to-node transport.
  */
 public class ShardScanWithDelegationHandler implements FragmentInstructionHandler<ShardScanWithDelegationInstructionNode> {
 
@@ -85,7 +87,8 @@ public class ShardScanWithDelegationHandler implements FragmentInstructionHandle
                 context.hasDeletedDocs(),
                 context.hasPartialAggregate(),
                 segment.address(),
-                context.getFragmentBytes()
+                context.getFragmentBytes(),
+                FieldMaskingFfmCodec.encode(context.getFieldValueTransformations())
             );
             return new DataFusionSessionState(sessionCtxHandle);
         }

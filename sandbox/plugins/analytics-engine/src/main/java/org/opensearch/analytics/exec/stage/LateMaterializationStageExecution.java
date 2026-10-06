@@ -230,7 +230,12 @@ public final class LateMaterializationStageExecution extends AbstractStageExecut
         this.transport = transport;
         this.shardStageId = shardStageId;
         this.fetchBackendId = fetchBackendId;
-        this.runner = new LocalTaskRunner(config.localTaskExecutor());
+        // The per-query virtual-thread executor is not an OpenSearch thread-pool executor and
+        // therefore does not preserve ThreadContext automatically. This task later sends the
+        // fetch-by-row-ID child requests whose data nodes resolve request-context-aware field
+        // masking. Restore the context captured by QueryContext so authorization headers are
+        // propagated with those requests rather than allowing the fetch to resolve no masking.
+        this.runner = new LocalTaskRunner(command -> config.localTaskExecutor().execute(config.preserveRequestContext(command)));
         this.wrapper = RelNodeUtils.findNode(stage.getFragment(), OpenSearchLateMaterialization.class);
         if (this.wrapper == null) {
             throw new IllegalStateException(

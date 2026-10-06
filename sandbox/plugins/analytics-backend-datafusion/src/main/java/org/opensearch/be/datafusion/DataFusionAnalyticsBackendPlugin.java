@@ -1072,11 +1072,19 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         return plugin.getTopQueriesByMemory();
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>The transformations are resolved on this data node and encoded for the local Rust FFM
+     * call by {@link FieldMaskingFfmCodec}; the descriptor bytes do not cross node-to-node
+     * transport.
+     */
     @Override
     public EngineResultStream fetchByRowIds(
         Reader reader,
         BigIntVector rowIdVector,
         String[] columns,
+        Map<String, org.opensearch.index.mapper.FieldValueTransformation> fieldValueTransformations,
         BufferAllocator allocator,
         long contextId,
         BufferAllocator importStagingAllocator
@@ -1109,7 +1117,8 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
                 count,
                 columns,
                 dataFusionService.getNativeRuntime().get(),
-                contextId
+                contextId,
+                FieldMaskingFfmCodec.encode(fieldValueTransformations)
             );
         } else {
             throw new IllegalStateException("BigIntVector buffer address is 0 or count is 0");

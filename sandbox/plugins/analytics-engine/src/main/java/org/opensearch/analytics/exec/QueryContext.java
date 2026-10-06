@@ -17,6 +17,7 @@ import org.opensearch.analytics.planner.dag.QueryDAG;
 import org.opensearch.analytics.planner.dag.ShardExecutionTarget;
 import org.opensearch.analytics.settings.AnalyticsQuerySettings;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.threadpool.ThreadPool;
 
 import java.util.List;
@@ -25,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 
 /**
  * Per-query context — immutable config (DAG, executor, parent task) + lazy per-query
@@ -88,8 +90,28 @@ public class QueryContext {
     private final Map<Integer, Map<Integer, ShardExecutionTarget>> resolvedTargetsByStage = new ConcurrentHashMap<>();
 
     private static final class SharedState {
+        /**
+         * Contains the request headers - including security critical authentication and authorization headers.
+         *
+         * <p>Use it through {@link QueryContext#preserveRequestContext(Runnable)} whenever query
+         * work moves onto an executor that does not preserve OpenSearch thread context, notably
+         * {@link QueryContext#localTaskExecutor()}. The returned wrapper opens a fresh
+         * {@link ThreadContext.StoredContext} for each invocation and closes it after the command,
+         * restoring the worker thread's previous context. This must happen before invoking a
+         * request-context-aware provider or sending a child transport request so the receiving
+         * node sees the originating authorization state. OpenSearch thread-pool executors already
+         * preserve context and do not need this additional wrapper.
+         *
+         * <p>The value is {@code null} only for test contexts constructed without a
+         * {@link ThreadPool}.
+         */
+        final Supplier<ThreadContext.StoredContext> requestContext;
         volatile ExecutorService localTaskExecutor;
         boolean executorClosed;  // guarded by synchronized(this)
+
+        SharedState(ThreadPool threadPool) {
+            requestContext = threadPool == null ? null : threadPool.getThreadContext().newRestorableContext(false);
+        }
     }
 
     public QueryContext(
@@ -111,7 +133,7 @@ public class QueryContext {
             allocator,
             ownsAllocator,
             /* profile */ false,
-            new SharedState()
+            new SharedState(threadPool)
         );
     }
 
@@ -135,7 +157,7 @@ public class QueryContext {
             allocator,
             ownsAllocator,
             /* profile */ false,
-            new SharedState()
+            new SharedState(threadPool)
         );
     }
 
@@ -165,7 +187,7 @@ public class QueryContext {
             allocator,
             ownsAllocator,
             profile,
-            new SharedState()
+            new SharedState(threadPool)
         );
     }
 
@@ -352,6 +374,24 @@ public class QueryContext {
         return exec;
     }
 
+    /**
+     * Wraps work with the request thread context captured when this query context was created.
+     * Local stages can start from asynchronous completion callbacks, including virtual threads
+     * that do not carry OpenSearch thread context. Restoring the originating request context
+     * ensures any transport request they dispatch propagates the authenticated request headers.
+     */
+    public Runnable preserveRequestContext(Runnable command) {
+        Supplier<ThreadContext.StoredContext> requestContext = sharedState.requestContext;
+        if (requestContext == null) {
+            return command;
+        }
+        return () -> {
+            try (ThreadContext.StoredContext ignored = requestContext.get()) {
+                command.run();
+            }
+        };
+    }
+
     boolean ownsAllocator() {
         return ownsAllocator;
     }
@@ -424,7 +464,7 @@ public class QueryContext {
             testAllocator,
             true,
             /* profile */ false,
-            new SharedState()
+            new SharedState(null)
         );
     }
 }

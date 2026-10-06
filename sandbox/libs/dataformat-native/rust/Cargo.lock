@@ -445,6 +445,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake2b_simd"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3560a7b1951efe814fcd721938313adc56753ca39f4b23847d7e9a2402f5dbff"
+dependencies = [
+ "arrayvec",
+ "constant_time_eq",
+]
+
+[[package]]
 name = "blake3"
 version = "1.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2839,6 +2849,7 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "base64",
+ "blake2b_simd",
  "bytes",
  "chrono",
  "chrono-tz",
@@ -2871,6 +2882,7 @@ dependencies = [
  "roaring",
  "serde_json",
  "sha1",
+ "sha2 0.10.9",
  "substrait",
  "tempfile",
  "thiserror 1.0.69",

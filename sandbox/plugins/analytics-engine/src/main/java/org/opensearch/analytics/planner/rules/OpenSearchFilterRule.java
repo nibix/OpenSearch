@@ -132,6 +132,12 @@ public class OpenSearchFilterRule extends RelOptRule {
             return rexCall.clone(rexCall.getType(), annotatedOperands);
         }
         List<String> viableBackends = resolveViableBackends(rexCall, fieldStorageInfos, childViableBackends);
+        if (fieldStorageInfos.stream().anyMatch(FieldStorageInfo::isMasked)) {
+            // Keep the entire filter on the masking backend. Delegating even an unmasked
+            // sibling predicate would select the indexed raw-value path, where the masked
+            // predicate must remain above the scan and the delegation marker cannot execute.
+            viableBackends = viableBackends.stream().filter("datafusion"::equals).toList();
+        }
         // TODO: viableBackends here is computed from each backend's declared FilterCapability
         // (see resolveViableBackends below). Today a backend can advertise a function as
         // filter-capable without actually shipping a DelegatedPredicateSerializer for it; the
@@ -198,6 +204,20 @@ public class OpenSearchFilterRule extends RelOptRule {
                     List<String> literalFieldNames = refs.literalFields();
                     boolean lenient = refs.lenient();
                     if (literalFieldNames.isEmpty()) {
+                        FieldStorageInfo maskedField = fieldStorageInfos.stream()
+                            .filter(FieldStorageInfo::isMasked)
+                            .findFirst()
+                            .orElse(null);
+                        if (maskedField != null) {
+                            // Default-field and pattern expansion may include this field. Since
+                            // text-relevance over masked values is unsupported, fail before a
+                            // backend can evaluate the criterion against raw index structures.
+                            throw new IllegalArgumentException(
+                                "Text-relevance and PPL search criteria are not supported for masked field ["
+                                    + maskedField.getFieldName()
+                                    + "]"
+                            );
+                        }
                         // No explicit literal fields to type-check: only patterns and/or default-field
                         // fan-out, which OpenSearch resolves best-effort at execution. Fall back to the
                         // TEXT-type assumption and let the full-text-capable backend handle it.
@@ -227,6 +247,11 @@ public class OpenSearchFilterRule extends RelOptRule {
                             // classified as patterns and handled by the empty-literals branch above.)
                             throw new IllegalArgumentException("Field [" + fieldName + "] not found.");
                         }
+                        if (storageInfo.isMasked()) {
+                            throw new IllegalArgumentException(
+                                "Text-relevance and PPL search criteria are not supported for masked field [" + fieldName + "]"
+                            );
+                        }
                         viableSet.retainAll(registry.filterBackendsForField(function, storageInfo));
                     }
                     if (viableSet.isEmpty()) {
@@ -243,6 +268,12 @@ public class OpenSearchFilterRule extends RelOptRule {
                 }
                 // FULL_TEXT but not a literal-field-encoding function (e.g. QUERY no-field variant,
                 // MATCHALL): no explicit field list to validate — fall back to TEXT type assumption.
+                FieldStorageInfo maskedField = fieldStorageInfos.stream().filter(FieldStorageInfo::isMasked).findFirst().orElse(null);
+                if (maskedField != null) {
+                    throw new IllegalArgumentException(
+                        "Text-relevance and PPL search criteria are not supported for masked field [" + maskedField.getFieldName() + "]"
+                    );
+                }
                 return new ArrayList<>(registry.filterBackendsAnyFormat(function, FieldType.TEXT));
             }
             // No field reference (non-deterministic, or an unfoldable constant like
@@ -254,6 +285,11 @@ public class OpenSearchFilterRule extends RelOptRule {
 
         for (int fieldIndex : fieldIndices) {
             FieldStorageInfo storageInfo = FieldStorageInfo.resolve(fieldStorageInfos, fieldIndex);
+            if (function.getCategory() == ScalarFunction.Category.FULL_TEXT && storageInfo.isMasked()) {
+                throw new IllegalArgumentException(
+                    "Text-relevance and PPL search criteria are not supported for masked field [" + storageInfo.getFieldName() + "]"
+                );
+            }
 
             Set<String> fieldViable;
             if (storageInfo.isDerived()) {

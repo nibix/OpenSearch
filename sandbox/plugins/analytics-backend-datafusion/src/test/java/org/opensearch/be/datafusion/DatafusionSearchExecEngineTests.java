@@ -180,6 +180,7 @@ public class DatafusionSearchExecEngineTests extends OpenSearchTestCase {
             false,
             false,
             configSegment.address(),
+            new byte[0],
             new byte[0]
         );
         arena.close();

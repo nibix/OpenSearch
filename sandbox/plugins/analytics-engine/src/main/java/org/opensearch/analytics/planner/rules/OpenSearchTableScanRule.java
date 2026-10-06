@@ -82,6 +82,22 @@ public class OpenSearchTableScanRule extends RelOptRule {
         List<String> delegationSupporters = registry.delegationSupporters(DelegationType.SCAN);
         List<String> delegationAcceptors = registry.delegationAcceptors(DelegationType.SCAN);
         List<String> viableBackends = new ArrayList<>(registry.scanCapableBackends());
+        if (fieldStorage.stream().anyMatch(FieldStorageInfo::isMasked)) {
+            // TODO: Make the analytics Lucene backend honor request-scoped field-value transformations.
+            // Security's legacy Lucene field masking is installed as an IndexModule reader wrapper and is
+            // applied when IndexShard acquires an engine searcher. The analytics Lucene backend bypasses
+            // that path: LuceneSearchBackEnd opens its own DirectoryReader, and LuceneReader builds and
+            // shares an IndexSearcher over that unwrapped reader across requests. Its scan and delegation
+            // paths therefore see the original indexed representation. The legacy wrapper also cannot be
+            // applied once when the shared reader is created because its masking policy is request-specific.
+            // Until analytics has a request-aware Lucene wrapping/transformation hook, DataFusion's raw-read
+            // boundary is the only analytics path that applies MapperPlugin field-value transformations.
+            // This is deliberately fail-closed, but it currently limits masked scans to indices whose value
+            // format DataFusion can read (today, Parquet). In particular, FieldStorageResolver currently assigns
+            // doc values only to the primary format, so a Lucene-primary index is rejected here even when it has
+            // a Parquet secondary; a Parquet-primary index can use DataFusion regardless of a Lucene secondary.
+            viableBackends.retainAll(List.of("datafusion"));
+        }
 
         // Two-phase field coverage check:
         // 1. Value-producing backends (DocValues / StoredFields) must cover EVERY field —

@@ -35,6 +35,7 @@ import org.opensearch.analytics.planner.rel.OpenSearchProject;
 import org.opensearch.analytics.planner.rel.OpenSearchTableScan;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.spi.DelegationType;
+import org.opensearch.analytics.spi.FieldStorageInfo;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.analytics.spi.ProjectCapability;
 import org.opensearch.analytics.spi.ScalarFunction;
@@ -42,6 +43,7 @@ import org.opensearch.analytics.spi.ScalarFunction;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -391,6 +393,22 @@ public class ProjectRuleTests extends BasePlannerRulesTests {
         );
     }
 
+    public void testMaskedFieldInRowNumberIsRejected() {
+        RexNode rowNumber = makeRowNumberOver(/*partitionField*/ 0, /*orderField*/ 1);
+        LogicalProject project = LogicalProject.create(
+            stubScan(nameValueTable()),
+            List.of(),
+            List.of(rexBuilder.makeInputRef(typeFactory.createSqlType(SqlTypeName.VARCHAR), 0), rowNumber),
+            List.of("name", "rn")
+        );
+
+        IllegalArgumentException exception = expectThrows(
+            IllegalArgumentException.class,
+            () -> runPlanner(project, maskedNameContext())
+        );
+        assertEquals("Window functions are not supported for masked field [name]", exception.getMessage());
+    }
+
     /**
      * Strip-annotations on a project containing a {@link RexOver} hoists each unique window
      * call into a child {@link LogicalProject} (see {@code OpenSearchProject#liftNestedRexOver})
@@ -719,6 +737,53 @@ public class ProjectRuleTests extends BasePlannerRulesTests {
 
     private static Map<String, Map<String, Object>> nameValueFields() {
         return Map.of("name", Map.of("type", "keyword"), "value", Map.of("type", "integer"));
+    }
+
+    private RelOptTable nameValueTable() {
+        return mockTable(
+            "test_index",
+            new String[] { "name", "value" },
+            new SqlTypeName[] { SqlTypeName.VARCHAR, SqlTypeName.INTEGER }
+        );
+    }
+
+    private PlannerContext maskedNameContext() {
+        return buildContextWithExplicitStorage(
+            2,
+            Map.of(
+                "name",
+                new FieldStorageInfo(
+                    "name",
+                    "keyword",
+                    FieldType.KEYWORD,
+                    List.of(MockDataFusionBackend.PARQUET_DATA_FORMAT),
+                    List.of(),
+                    List.of(),
+                    false,
+                    new LinkedHashSet<>(),
+                    null,
+                    true
+                ),
+                "value",
+                new FieldStorageInfo(
+                    "value",
+                    "integer",
+                    FieldType.INTEGER,
+                    List.of(MockDataFusionBackend.PARQUET_DATA_FORMAT),
+                    List.of(),
+                    List.of(),
+                    false
+                )
+            ),
+            List.of(
+                new MockDataFusionBackend() {
+                    @Override
+                    public String name() {
+                        return "datafusion";
+                    }
+                }
+            )
+        );
     }
 
     private void assertAnnotation(RexNode expr, String expectedBackend) {

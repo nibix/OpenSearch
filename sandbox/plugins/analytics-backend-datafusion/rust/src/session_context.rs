@@ -77,6 +77,8 @@ pub struct SessionContextHandle {
     /// Phantom reservation holding pool capacity for untracked memory.
     /// Dropped when the handle is closed, releasing the capacity.
     pub(crate) phantom_reservation: Option<datafusion::execution::memory_pool::MemoryReservation>,
+    /// Locally resolved transformations for this concrete shard's raw values.
+    pub(crate) field_value_transformations: crate::masking::Transformations,
 }
 
 /// Configuration for indexed execution with filter delegation, provided by Java.
@@ -185,6 +187,7 @@ pub async unsafe fn create_session_context(
     has_partial_aggregate: bool,
     query_config: DatafusionQueryConfig,
     plan_bytes: &[u8],
+    field_value_transformations: crate::masking::Transformations,
 ) -> Result<i64, DataFusionError> {
     let runtime = &*(runtime_ptr as *const DataFusionRuntime);
     let shard_view = &*(shard_view_ptr as *const ShardView);
@@ -398,6 +401,10 @@ pub async unsafe fn create_session_context(
             .with_cache(stats_cache),
     );
 
+    let provider = crate::masking::MaskingTableProvider::wrap(
+        provider,
+        Arc::clone(&field_value_transformations),
+    );
     ctx.register_table(register_name.as_str(), provider)
         .map_err(|e| {
             error!(
@@ -435,6 +442,7 @@ pub async unsafe fn create_session_context(
         has_topk,
         prepared_plan: None,
         phantom_reservation: phantom,
+        field_value_transformations,
     };
     Ok(Box::into_raw(Box::new(handle)) as i64)
 }
@@ -524,6 +532,7 @@ pub async unsafe fn create_worker_session_context(
         has_topk: false,
         prepared_plan: None,
         phantom_reservation: None,
+        field_value_transformations: Arc::new(std::collections::HashMap::new()),
         io_handle: tokio::runtime::Handle::current(),
     };
     Ok(Box::into_raw(Box::new(handle)) as i64)
@@ -554,7 +563,11 @@ pub async unsafe fn create_session_context_indexed(
     has_partial_aggregate: bool,
     query_config: DatafusionQueryConfig,
     plan_bytes: &[u8],
+    field_value_transformations: crate::masking::Transformations,
 ) -> Result<i64, DataFusionError> {
+    // The default listing provider is replaced by IndexedTableProvider before execution. Do not
+    // wrap that throwaway provider; install the transformations on the handle so the replacement
+    // raw provider is wrapped exactly once in indexed_executor.
     let ptr = create_session_context(
         runtime_ptr,
         shard_view_ptr,
@@ -564,6 +577,7 @@ pub async unsafe fn create_session_context_indexed(
         has_partial_aggregate,
         query_config,
         plan_bytes,
+        Arc::new(std::collections::HashMap::new()),
     )
     .await?;
 
@@ -571,6 +585,7 @@ pub async unsafe fn create_session_context_indexed(
     // are now registered for every session by udf::register_all (via create_session_context above);
     // the indexed path additionally UNWRAPS them before execution.
     let handle = &mut *(ptr as *mut SessionContextHandle);
+    handle.field_value_transformations = field_value_transformations;
     handle.indexed_config = Some(IndexedExecutionConfig {
         tree_shape,
         delegated_predicate_count,
@@ -923,6 +938,7 @@ mod tests {
             has_topk: false,
             prepared_plan: None,
             phantom_reservation: None,
+            field_value_transformations: Arc::new(std::collections::HashMap::new()),
         };
         (handle, buf)
     }

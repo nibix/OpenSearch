@@ -428,9 +428,18 @@ pub unsafe extern "C" fn df_execute_query(
 
 /// Fetch specific rows by global row ID — QTF fetch phase.
 ///
-/// Row IDs are passed as a direct pointer to i64 values (from BigIntVector's
-/// off-heap ArrowBuf). Zero-copy at FFM boundary: Rust reads directly from
-/// Java's off-heap buffer without any intermediate allocation.
+/// Row IDs are passed as a direct pointer to i64 values from BigIntVector's off-heap ArrowBuf.
+/// Rust reads that buffer during the downcall and copies the IDs into owned memory before
+/// asynchronous execution begins.
+///
+/// # Safety
+///
+/// `shard_view_ptr` and `runtime_ptr` must point to live instances created by this library.
+/// When their corresponding counts are non-zero, `row_ids_ptr`, `col_names_ptr`,
+/// `col_names_len_ptr`, and `masking_ptr` must point to correctly aligned, initialized buffers
+/// of the declared lengths; every pointer in `col_names_ptr` must likewise address the number of
+/// bytes in the corresponding `col_names_len_ptr` entry. All referenced memory must remain valid
+/// for the duration of this call.
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn df_fetch_by_row_ids(
@@ -442,6 +451,8 @@ pub unsafe extern "C" fn df_fetch_by_row_ids(
     col_names_count: i64,
     runtime_ptr: i64,
     context_id: i64,
+    masking_ptr: *const u8,
+    masking_len: i64,
 ) -> i64 {
     // Hard FFM-boundary checks (UB risk if violated): pointers must be non-zero before any deref.
     // Always-on `assert!` (not debug_assert!) — these protect against use-after-close from Java.
@@ -479,14 +490,36 @@ pub unsafe extern "C" fn df_fetch_by_row_ids(
             col_names_count
         );
     }
+    assert!(
+        masking_len >= 0,
+        "df_fetch_by_row_ids: negative masking_len {masking_len}"
+    );
 
     let mgr = get_rt_manager()?;
     let shard_view = &*(shard_view_ptr as *const crate::api::ShardView);
     let runtime = &*(runtime_ptr as *const crate::api::DataFusionRuntime);
+    let masking_bytes = if masking_len > 0 {
+        assert!(
+            !masking_ptr.is_null(),
+            "df_fetch_by_row_ids: null masking pointer"
+        );
+        slice::from_raw_parts(masking_ptr, masking_len as usize)
+    } else {
+        // Java passes (NULL, 0) when no field transformations are configured. Use a native
+        // empty slice rather than calling from_raw_parts: Rust requires its pointer to be
+        // non-null and aligned even when the requested length is zero.
+        &[]
+    };
+    let transformations = crate::masking::decode(masking_bytes).map_err(|e| e.to_string())?;
 
-    // Zero-copy read from BigIntVector's direct buffer
-    let row_ids: Vec<i64> =
-        slice::from_raw_parts(row_ids_ptr as *const i64, row_ids_count as usize).to_vec();
+    // Copy before entering asynchronous execution so no borrowed ArrowBuf memory can outlive
+    // the Java downcall. Avoid from_raw_parts for the zero-count case because its pointer may be
+    // null, while Rust slices require a non-null, aligned pointer even when empty.
+    let row_ids: Vec<i64> = if row_ids_count > 0 {
+        slice::from_raw_parts(row_ids_ptr as *const i64, row_ids_count as usize).to_vec()
+    } else {
+        Vec::new()
+    };
 
     // Parse column names
     let mut columns: Vec<String> = Vec::with_capacity(col_names_count as usize);
@@ -500,7 +533,13 @@ pub unsafe extern "C" fn df_fetch_by_row_ids(
 
     mgr.io_runtime
         .block_on(crate::api::fetch_by_row_ids(
-            shard_view, runtime, &mgr, row_ids, columns, context_id,
+            shard_view,
+            runtime,
+            &mgr,
+            row_ids,
+            columns,
+            context_id,
+            transformations,
         ))
         .map_err(|e| e.to_string())
 }
@@ -1252,6 +1291,8 @@ pub unsafe extern "C" fn df_create_session_context(
     has_partial_aggregate: u8,
     plan_ptr: *const u8,
     plan_len: i64,
+    masking_ptr: *const u8,
+    masking_len: i64,
 ) -> i64 {
     crate::search_stats::inc_listing_table_scan();
     let table_name = str_from_raw(table_name_ptr, table_name_len)
@@ -1263,6 +1304,20 @@ pub unsafe extern "C" fn df_create_session_context(
     } else {
         &[]
     };
+    assert!(
+        masking_len >= 0,
+        "df_create_session_context: negative masking_len {masking_len}"
+    );
+    let masking_bytes: &[u8] = if masking_len > 0 {
+        assert!(
+            !masking_ptr.is_null(),
+            "df_create_session_context: null masking pointer"
+        );
+        slice::from_raw_parts(masking_ptr, masking_len as usize)
+    } else {
+        &[]
+    };
+    let transformations = crate::masking::decode(masking_bytes).map_err(|e| e.to_string())?;
     let mgr = get_rt_manager()?;
     mgr.io_runtime
         .block_on(crate::task_monitors::plan_setup_monitor().instrument(
@@ -1275,6 +1330,7 @@ pub unsafe extern "C" fn df_create_session_context(
                 has_partial_aggregate != 0,
                 query_config,
                 plan_bytes,
+                transformations,
             ),
         ))
         .map_err(|e| e.to_string())
@@ -1317,6 +1373,8 @@ pub unsafe extern "C" fn df_create_session_context_indexed(
     query_config_ptr: i64,
     plan_ptr: *const u8,
     plan_len: i64,
+    masking_ptr: *const u8,
+    masking_len: i64,
 ) -> i64 {
     match tree_shape {
         1 => crate::search_stats::inc_single_collector_scan(),
@@ -1332,6 +1390,20 @@ pub unsafe extern "C" fn df_create_session_context_indexed(
     } else {
         &[]
     };
+    assert!(
+        masking_len >= 0,
+        "df_create_session_context_indexed: negative masking_len {masking_len}"
+    );
+    let masking_bytes: &[u8] = if masking_len > 0 {
+        assert!(
+            !masking_ptr.is_null(),
+            "df_create_session_context_indexed: null masking pointer"
+        );
+        slice::from_raw_parts(masking_ptr, masking_len as usize)
+    } else {
+        &[]
+    };
+    let transformations = crate::masking::decode(masking_bytes).map_err(|e| e.to_string())?;
     let mgr = get_rt_manager()?;
     mgr.io_runtime
         .block_on(crate::task_monitors::plan_setup_monitor().instrument(
@@ -1347,6 +1419,7 @@ pub unsafe extern "C" fn df_create_session_context_indexed(
                 has_partial_aggregate != 0,
                 query_config,
                 plan_bytes,
+                transformations,
             ),
         ))
         .map_err(|e| e.to_string())

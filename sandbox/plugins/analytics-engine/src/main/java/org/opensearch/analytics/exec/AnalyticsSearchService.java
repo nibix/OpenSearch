@@ -53,15 +53,23 @@ import org.opensearch.core.tasks.TaskCancelledException;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.engine.exec.IndexReaderProvider;
 import org.opensearch.index.engine.exec.IndexReaderProvider.Reader;
+import org.opensearch.index.mapper.FieldValueTransformation;
+import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.shard.IndexShard;
+import org.opensearch.plugins.FieldValueTransformationProvider;
 import org.opensearch.tasks.Task;
 import org.opensearch.tasks.TaskResourceTrackingService;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Executor;
 
 /**
@@ -111,9 +119,10 @@ public class AnalyticsSearchService implements AutoCloseable {
      */
     private final BufferAllocator importStagingAllocator;
     private final ArrowNativeAllocator nativeAllocator;
+    private final FieldValueTransformationProvider fieldValueTransformations;
 
     public AnalyticsSearchService(Map<String, AnalyticsSearchBackendPlugin> backends, ArrowNativeAllocator nativeAllocator) {
-        this(backends, List.of(), nativeAllocator, null, null);
+        this(backends, List.of(), nativeAllocator, null, null, FieldValueTransformationProvider.NOOP);
     }
 
     public AnalyticsSearchService(
@@ -122,7 +131,7 @@ public class AnalyticsSearchService implements AutoCloseable {
         NamedWriteableRegistry namedWriteableRegistry,
         ReaderContextStore readerContextStore
     ) {
-        this(backends, List.of(), nativeAllocator, namedWriteableRegistry, readerContextStore);
+        this(backends, List.of(), nativeAllocator, namedWriteableRegistry, readerContextStore, FieldValueTransformationProvider.NOOP);
     }
 
     public AnalyticsSearchService(
@@ -130,7 +139,8 @@ public class AnalyticsSearchService implements AutoCloseable {
         List<AnalyticsOperationListener> listeners,
         ArrowNativeAllocator nativeAllocator,
         NamedWriteableRegistry namedWriteableRegistry,
-        ReaderContextStore readerContextStore
+        ReaderContextStore readerContextStore,
+        FieldValueTransformationProvider fieldValueTransformations
     ) {
         this.backends = backends;
         this.listener = new AnalyticsOperationListener.CompositeListener(listeners);
@@ -151,6 +161,7 @@ public class AnalyticsSearchService implements AutoCloseable {
         this.importStagingAllocator = allocator.getRoot().newChildAllocator("arrow-import-staging", 0, Long.MAX_VALUE);
         this.namedWriteableRegistry = namedWriteableRegistry;
         this.readerContextStore = readerContextStore;
+        this.fieldValueTransformations = Objects.requireNonNull(fieldValueTransformations, "fieldValueTransformations");
     }
 
     @Override
@@ -754,6 +765,7 @@ public class AnalyticsSearchService implements AutoCloseable {
                 readerContext.getReader(),
                 rowIdVector,
                 columns,
+                resolveFieldValueTransformations(shard.mapperService(), shard.shardId().getIndexName(), new HashSet<>(List.of(columns))),
                 allocator,
                 task.getNativeTaskId(),
                 importStagingAllocator
@@ -1153,7 +1165,57 @@ public class AnalyticsSearchService implements AutoCloseable {
         ctx.setQueryCache(shard.getQueryCache());
         ctx.setQueryCachingPolicy(shard.getQueryCachingPolicy());
         ctx.setShardId(shard.shardId());
+        ctx.setFieldValueTransformations(resolveFieldValueTransformations(shard.mapperService(), tableName, null));
         return ctx;
+    }
+
+    private Map<String, FieldValueTransformation> resolveFieldValueTransformations(
+        org.opensearch.index.mapper.MapperService mapperService,
+        String concreteIndex,
+        Set<String> requestedFields
+    ) {
+        FieldValueTransformationProvider.FieldTransformations perField = Objects.requireNonNull(
+            fieldValueTransformations.forIndex(concreteIndex),
+            "field value transformation resolver returned null for index [" + concreteIndex + "]"
+        );
+        Map<String, FieldValueTransformation> resolved = new LinkedHashMap<>();
+        for (MappedFieldType mappedField : mapperService.fieldTypes()) {
+            if (requestedFields != null && requestedFields.contains(mappedField.name()) == false) {
+                continue;
+            }
+            Optional<FieldValueTransformation> transformation = Objects.requireNonNull(
+                perField.resolve(mappedField.name()),
+                "field value transformation resolver returned null for field [" + mappedField.name() + "]"
+            );
+            if (transformation.isEmpty()) {
+                continue;
+            }
+            // The initial masking contract is deliberately limited to keyword and text fields.
+            // Hash and regex replacement have defined UTF-8 string-in/string-out semantics, and
+            // the native readers apply them element-wise to both scalar and multi-valued strings.
+            // Dates, IP addresses, and geo fields are especially easy to mistake for strings
+            // because their APIs accept or render textual forms: dates are represented internally
+            // as epoch-based numbers, IP addresses as encoded address values, and geo points/shapes
+            // as numeric coordinates or encoded geometry.
+            // Their display syntax therefore cannot be masked as though it were
+            // the stored value without defining formatting, comparison, and result-type semantics.
+            // Even other string-like mapper types such as constant_keyword, wildcard, and
+            // match_only_text need their planner schema, operator behavior, and physical Arrow
+            // representations validated across both scan and fetch paths.
+            if ("keyword".equals(mappedField.typeName()) == false && "text".equals(mappedField.typeName()) == false) {
+                throw new IllegalArgumentException(
+                    "Field value transformation for ["
+                        + concreteIndex
+                        + "]["
+                        + mappedField.name()
+                        + "] requires a text or keyword field but mapping type is ["
+                        + mappedField.typeName()
+                        + "]"
+                );
+            }
+            resolved.put(mappedField.name(), transformation.get());
+        }
+        return resolved;
     }
 
     // ── Assertion helpers (invoked only when -ea is enabled; bodies are dead in production) ──
