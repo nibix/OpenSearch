@@ -1017,7 +1017,8 @@ public class ReadAccessPolicyIntegrationIT extends OpenSearchIntegTestCase {
         ) {
             this.threadPool = threadPool;
             this.nodeName = Node.NODE_NAME_SETTING.get(environment.settings());
-            return List.of(new FieldValueTransformationProvider(index -> field -> resolveFieldValueTransformation(index, field)));
+            FieldValueTransformationProvider provider = index -> field -> resolveFieldValueTransformation(index, field);
+            return List.of(provider);
         }
 
         @Override
