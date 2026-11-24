@@ -12,7 +12,6 @@ import org.opensearch.common.annotation.ExperimentalApi;
 
 /** Supplies effective read-access policies for the current request. */
 @ExperimentalApi
-@FunctionalInterface
 public interface ReadAccessPolicyProvider {
 
     /**
@@ -24,4 +23,14 @@ public interface ReadAccessPolicyProvider {
      * implementations may return the stateless {@link DocumentLevelReadAccessPolicy#unrestricted()} policy when appropriate.
      */
     DocumentLevelReadAccessPolicy getDocumentLevelReadAccessPolicy(ReadAccessContext context);
+
+    /**
+     * Returns the field-value transformation policy for a concrete index and the current read request.
+     * For a user read, the caller must invoke this method after authorization with that user's request context
+     * installed on the calling thread. An internal read must carry its system request context. The provider
+     * resolves and captures the effective masking rules at this point.
+     * The returned policy can be used on another thread during the same request, without the original thread context,
+     * but must not be cached or reused for another request or user.
+     */
+    FieldValueTransformationPolicy getFieldValueTransformationPolicy(String concreteIndex);
 }

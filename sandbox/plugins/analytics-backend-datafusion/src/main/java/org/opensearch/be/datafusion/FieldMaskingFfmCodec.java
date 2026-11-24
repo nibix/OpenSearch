@@ -77,6 +77,9 @@ final class FieldMaskingFfmCodec {
                             writeString(out, replacement.replacement());
                         }
                     }
+                    case FieldValueTransformation.None none -> throw new IllegalArgumentException(
+                        "None transformations must not be encoded"
+                    );
                 }
             }
             out.flush();

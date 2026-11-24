@@ -15,6 +15,7 @@ import org.apache.calcite.sql.util.SqlOperatorTables;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.ActionRequest;
+import org.opensearch.action.support.ReadAccessPolicyService;
 import org.opensearch.analytics.exec.AnalyticsFragmentSlowLog;
 import org.opensearch.analytics.exec.AnalyticsSearchService;
 import org.opensearch.analytics.exec.AnalyticsSearchSlowLog;
@@ -69,7 +70,6 @@ import org.opensearch.index.search.stats.SearchStats;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.ExtensiblePlugin;
 import org.opensearch.plugins.FieldFilterProvider;
-import org.opensearch.plugins.FieldValueTransformationProvider;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.PluginComponentRegistry;
 import org.opensearch.plugins.SearchStatsContributor;
@@ -194,13 +194,12 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         Function<String, Predicate<String>> fieldFilter = pluginComponentRegistry.getComponent(FieldFilterProvider.class)
             .orElseThrow(() -> new IllegalStateException("FieldFilterProvider not available; it must be provided by the node"))
             .getFieldFilter();
-        FieldValueTransformationProvider fieldValueTransformations = pluginComponentRegistry.getComponent(
-            FieldValueTransformationProvider.class
-        ).orElse(FieldValueTransformationProvider.NOOP);
+        ReadAccessPolicyService readAccessPolicyService = pluginComponentRegistry.getComponent(ReadAccessPolicyService.class)
+            .orElseThrow(() -> new IllegalStateException("ReadAccessPolicyService not available; it must be provided by the node"));
 
         CapabilityRegistry capabilityRegistry = new CapabilityRegistry(
             backEnds,
-            indexMetadata -> new FieldStorageResolver(indexMetadata, fieldValueTransformations)
+            indexMetadata -> new FieldStorageResolver(indexMetadata, readAccessPolicyService::getFieldValueTransformationPolicy)
         );
         QueryBuilderTranslationService queryBuilderTranslationService = new QueryBuilderTranslationService(queryBuilderTranslatorProviders);
         LogicalPlanDlsRewriter logicalPlanDlsRewriter = new LogicalPlanDlsRewriter(queryBuilderTranslationService);
@@ -220,7 +219,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
             nativeAllocator,
             namedWriteableRegistry,
             readerContextStore,
-            fieldValueTransformations
+            readAccessPolicyService::getFieldValueTransformationPolicy
         );
         searchService.setShuffleBufferRegistry(shuffleBufferManager);
         // Wire the node-level shuffle budget from settings (initial value + dynamic updates). The

@@ -21,12 +21,7 @@ opensearchplugin {
   // (arrow-flight-rpc, analytics-backend-datafusion, parquet-data-format, …). Cross-plugin
   // Arrow types (VectorSchemaRoot, ArrowBatchResponse) only work when loaded by the same classloader.
   // arrow-base exposes ArrowNativeAllocator + the SPI used to source the query pool.
-  // Temporarily model Security as an optional extended plugin so that, when installed, its
-  // FieldValueTransformationProvider is registered before analytics-engine initializes. This
-  // ordering mechanism needs further evaluation because extended plugins also introduce a
-  // classloader-parent relationship; Security remains optional so installations without it
-  // continue to select the no-security transformation policy.
-  extendedPlugins = ['arrow-base', 'opensearch-security;optional=true']
+  extendedPlugins = ['arrow-base']
 }
 
 java { sourceCompatibility = JavaVersion.toVersion(25); targetCompatibility = JavaVersion.toVersion(25) }

@@ -21,7 +21,7 @@ import java.util.regex.PatternSyntaxException;
  *
  * <p>The descriptor contains no request identity. The Security plugin resolves it from the
  * current request context for a concrete index and field through
- * {@link org.opensearch.plugins.FieldValueTransformationProvider#forIndex(String)}.
+ * {@link org.opensearch.action.support.ReadAccessPolicyProvider#getFieldValueTransformationPolicy(String)}.
  *
  * <p>Only string-valued {@code keyword} and {@code text} leaves are initially supported. Readers
  * must apply the same transformation to every string element of a multi-valued field, preserve
@@ -30,7 +30,25 @@ import java.util.regex.PatternSyntaxException;
  * @opensearch.experimental
  */
 @ExperimentalApi
-public sealed interface FieldValueTransformation permits FieldValueTransformation.Hash, FieldValueTransformation.RegexReplace {
+public sealed interface FieldValueTransformation permits FieldValueTransformation.None, FieldValueTransformation.Hash,
+    FieldValueTransformation.RegexReplace {
+
+    /** A field with no value transformation. */
+    enum None implements FieldValueTransformation {
+        INSTANCE;
+
+        @Override
+        public boolean isPresent() {
+            return false;
+        }
+    }
+
+    static FieldValueTransformation none() {
+        return None.INSTANCE;
+    }
+
+    /** Returns whether this descriptor transforms field values. */
+    boolean isPresent();
 
     /** The deliberately small set of hash modes whose output is part of the masking contract. */
     enum HashAlgorithm {
@@ -62,6 +80,11 @@ public sealed interface FieldValueTransformation permits FieldValueTransformatio
         public byte[] salt() {
             return salt.clone();
         }
+
+        @Override
+        public boolean isPresent() {
+            return true;
+        }
     }
 
     /** Applies the supplied replacements in list order. */
@@ -71,6 +94,11 @@ public sealed interface FieldValueTransformation permits FieldValueTransformatio
             if (replacements.isEmpty()) {
                 throw new IllegalArgumentException("regex replacement list must not be empty");
             }
+        }
+
+        @Override
+        public boolean isPresent() {
+            return true;
         }
     }
 

@@ -8,19 +8,18 @@
 
 package org.opensearch.analytics.planner;
 
+import org.opensearch.action.support.FieldValueTransformationPolicy;
 import org.opensearch.analytics.spi.FieldStorageInfo;
 import org.opensearch.analytics.spi.FieldType;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.MappingMetadata;
 import org.opensearch.index.mapper.FieldValueTransformation;
-import org.opensearch.plugins.FieldValueTransformationProvider;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
+import java.util.function.Function;
 
 /**
  * Resolves per-field storage metadata from {@link IndexMetadata}.
@@ -60,16 +59,16 @@ public class FieldStorageResolver {
 
     @SuppressWarnings("unchecked")
     public FieldStorageResolver(IndexMetadata indexMetadata) {
-        this(indexMetadata, FieldValueTransformationProvider.NOOP);
+        this(indexMetadata, index -> FieldValueTransformationPolicy.unrestricted());
     }
 
     @SuppressWarnings("unchecked")
-    public FieldStorageResolver(IndexMetadata indexMetadata, FieldValueTransformationProvider fieldValueTransformations) {
+    public FieldStorageResolver(
+        IndexMetadata indexMetadata,
+        Function<String, FieldValueTransformationPolicy> fieldValueTransformationPolicies
+    ) {
         String indexName = indexMetadata.getIndex().getName();
-        FieldValueTransformationProvider.FieldTransformations perField = Objects.requireNonNull(
-            fieldValueTransformations.forIndex(indexName),
-            "field value transformation resolver returned null for index [" + indexName + "]"
-        );
+        FieldValueTransformationPolicy perField = fieldValueTransformationPolicies.apply(indexName);
         String primaryFormat = indexMetadata.getSettings().get(PRIMARY_DATA_FORMAT_SETTING, LUCENE_FORMAT);
         // Lucene is index-viable only when it's the primary or in the secondary list.
         boolean luceneAvailable = LUCENE_FORMAT.equals(primaryFormat)
@@ -96,7 +95,7 @@ public class FieldStorageResolver {
         String pathPrefix,
         String primaryFormat,
         boolean luceneAvailable,
-        FieldValueTransformationProvider.FieldTransformations transformations,
+        FieldValueTransformationPolicy transformations,
         String indexName
     ) {
         for (Map.Entry<String, Object> entry : properties.entrySet()) {
@@ -119,10 +118,7 @@ public class FieldStorageResolver {
                 // https://github.com/opensearch-project/OpenSearch/issues/23030.
                 continue;
             }
-            Optional<FieldValueTransformation> transformation = Objects.requireNonNull(
-                transformations.resolve(fieldName),
-                "field value transformation resolver returned null for field [" + fieldName + "]"
-            );
+            FieldValueTransformation transformation = transformations.resolve(fieldName);
             if (transformation.isPresent() && "keyword".equals(fieldType) == false && "text".equals(fieldType) == false) {
                 throw new IllegalArgumentException(
                     "Field value transformation for ["

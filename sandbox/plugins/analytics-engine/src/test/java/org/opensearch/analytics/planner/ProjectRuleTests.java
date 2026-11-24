@@ -402,10 +402,7 @@ public class ProjectRuleTests extends BasePlannerRulesTests {
             List.of("name", "rn")
         );
 
-        IllegalArgumentException exception = expectThrows(
-            IllegalArgumentException.class,
-            () -> runPlanner(project, maskedNameContext())
-        );
+        IllegalArgumentException exception = expectThrows(IllegalArgumentException.class, () -> runPlanner(project, maskedNameContext()));
         assertEquals("Window functions are not supported for masked field [name]", exception.getMessage());
     }
 
@@ -740,11 +737,7 @@ public class ProjectRuleTests extends BasePlannerRulesTests {
     }
 
     private RelOptTable nameValueTable() {
-        return mockTable(
-            "test_index",
-            new String[] { "name", "value" },
-            new SqlTypeName[] { SqlTypeName.VARCHAR, SqlTypeName.INTEGER }
-        );
+        return mockTable("test_index", new String[] { "name", "value" }, new SqlTypeName[] { SqlTypeName.VARCHAR, SqlTypeName.INTEGER });
     }
 
     private PlannerContext maskedNameContext() {
@@ -775,14 +768,12 @@ public class ProjectRuleTests extends BasePlannerRulesTests {
                     false
                 )
             ),
-            List.of(
-                new MockDataFusionBackend() {
-                    @Override
-                    public String name() {
-                        return "datafusion";
-                    }
+            List.of(new MockDataFusionBackend() {
+                @Override
+                public String name() {
+                    return "datafusion";
                 }
-            )
+            })
         );
     }
 

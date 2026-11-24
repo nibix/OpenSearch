@@ -17,6 +17,7 @@ import org.opensearch.action.get.MultiGetResponse;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.action.support.DocumentLevelReadAccessPolicy;
+import org.opensearch.action.support.FieldValueTransformationPolicy;
 import org.opensearch.action.support.ReadAccessContext;
 import org.opensearch.action.support.ReadAccessPolicyProvider;
 import org.opensearch.analytics.AnalyticsPlugin;
@@ -45,7 +46,6 @@ import org.opensearch.index.query.QueryBuilders;
 import org.opensearch.node.Node;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.plugins.AccessPolicyProviderPlugin;
-import org.opensearch.plugins.FieldValueTransformationProvider;
 import org.opensearch.plugins.MapperPlugin;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.PluginInfo;
@@ -65,6 +65,7 @@ import org.opensearch.watcher.ResourceWatcherService;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1017,13 +1018,32 @@ public class ReadAccessPolicyIntegrationIT extends OpenSearchIntegTestCase {
         ) {
             this.threadPool = threadPool;
             this.nodeName = Node.NODE_NAME_SETTING.get(environment.settings());
-            FieldValueTransformationProvider provider = index -> field -> resolveFieldValueTransformation(index, field);
-            return List.of(provider);
+            return List.of();
         }
 
         @Override
         public ReadAccessPolicyProvider getReadAccessPolicyProvider() {
-            return new TestReadAccessPolicyProvider();
+            return new TestReadAccessPolicyProvider(index -> {
+                ThreadPool currentThreadPool = threadPool;
+                String authorization = currentThreadPool == null
+                    ? null
+                    : currentThreadPool.getThreadContext().getHeader(MASKING_HEADER);
+                return new FieldValueTransformationPolicy() {
+                    @Override
+                    public FieldValueTransformation resolve(String mappedLeafField) {
+                        return resolveFieldValueTransformation(index, mappedLeafField, authorization);
+                    }
+
+                    @Override
+                    public Map<String, FieldValueTransformation> resolve(Collection<String> mappedLeafFields) {
+                        Map<String, FieldValueTransformation> resolved = new HashMap<>();
+                        for (String field : mappedLeafFields) {
+                            resolved.put(field, resolveFieldValueTransformation(index, field, authorization));
+                        }
+                        return Map.copyOf(resolved);
+                    }
+                };
+            });
         }
 
         @Override
@@ -1038,7 +1058,7 @@ public class ReadAccessPolicyIntegrationIT extends OpenSearchIntegTestCase {
             };
         }
 
-        private Optional<FieldValueTransformation> resolveFieldValueTransformation(String index, String field) {
+        private FieldValueTransformation resolveFieldValueTransformation(String index, String field, String authorization) {
             boolean maskedIndex = MASKED_INDEX.equals(index)
                 || MASKED_INDEX_SORTED_BY_MASKED_FIELD.equals(index)
                 || REMOTE_MASKED_INDEX.equals(index)
@@ -1048,22 +1068,24 @@ public class ReadAccessPolicyIntegrationIT extends OpenSearchIntegTestCase {
                 transformation = new FieldValueTransformation.Hash(FieldValueTransformation.HashAlgorithm.SHA_256, new byte[0]);
             }
             if (transformation != null) {
-                ThreadPool currentThreadPool = threadPool;
-                String authorization = currentThreadPool == null
-                    ? null
-                    : currentThreadPool.getThreadContext().getHeader(MASKING_HEADER);
                 OBSERVATIONS.add(new MaskingObservation(nodeName, field, Thread.currentThread().getName(), authorization));
                 if (MASKING_HEADER_VALUE.equals(authorization)) {
-                    return Optional.of(transformation);
+                    return transformation;
                 }
             }
-            return Optional.empty();
+            return FieldValueTransformation.none();
         }
     }
 
     record MaskingObservation(String node, String field, String thread, String authorizationHeader) {}
 
     private static class TestReadAccessPolicyProvider implements ReadAccessPolicyProvider {
+        private final Function<String, FieldValueTransformationPolicy> fieldValueTransformationPolicies;
+
+        TestReadAccessPolicyProvider(Function<String, FieldValueTransformationPolicy> fieldValueTransformationPolicies) {
+            this.fieldValueTransformationPolicies = fieldValueTransformationPolicies;
+        }
+
         @Override
         public DocumentLevelReadAccessPolicy getDocumentLevelReadAccessPolicy(ReadAccessContext context) {
             if (context.concreteIndices().contains(RESTRICTED_INDEX)) {
@@ -1072,6 +1094,11 @@ public class ReadAccessPolicyIntegrationIT extends OpenSearchIntegTestCase {
                 );
             }
             return DocumentLevelReadAccessPolicy.unrestricted();
+        }
+
+        @Override
+        public FieldValueTransformationPolicy getFieldValueTransformationPolicy(String concreteIndex) {
+            return fieldValueTransformationPolicies.apply(concreteIndex);
         }
     }
 

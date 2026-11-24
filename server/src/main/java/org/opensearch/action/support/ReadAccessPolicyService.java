@@ -55,4 +55,22 @@ public final class ReadAccessPolicyService {
         }
         return Objects.requireNonNull(provider.getDocumentLevelReadAccessPolicy(context), "ReadAccessPolicyProvider returned null");
     }
+
+    /**
+     * Returns the effective field masking policy, or an unrestricted policy when no provider is installed.
+     * Call during the read request with its authorization context on the current thread, as required by
+     * {@link ReadAccessPolicyProvider#getFieldValueTransformationPolicy(String)}.
+     */
+    public FieldValueTransformationPolicy getFieldValueTransformationPolicy(String concreteIndex) {
+        if (initialized == false) {
+            throw new IllegalStateException("ReadAccessPolicyService is not initialized");
+        }
+        if (provider == null) {
+            return FieldValueTransformationPolicy.unrestricted();
+        }
+        return Objects.requireNonNull(
+            provider.getFieldValueTransformationPolicy(concreteIndex),
+            "ReadAccessPolicyProvider returned null field-value transformation policy"
+        );
+    }
 }

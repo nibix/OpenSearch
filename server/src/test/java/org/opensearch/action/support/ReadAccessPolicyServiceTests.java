@@ -23,15 +23,29 @@ public class ReadAccessPolicyServiceTests extends OpenSearchTestCase {
         service.initialize();
 
         assertSame(DocumentLevelReadAccessPolicy.unrestricted(), service.getDocumentLevelReadAccessPolicy(context()));
+        assertFalse(service.getFieldValueTransformationPolicy("logs").resolve("secret").isPresent());
     }
 
     public void testDelegatesToInstalledProvider() {
         DocumentLevelReadAccessPolicy expected = mock(DocumentLevelReadAccessPolicy.class);
-        AccessPolicyProviderPlugin plugin = () -> context -> expected;
+        FieldValueTransformationPolicy expectedFieldPolicy = mock(FieldValueTransformationPolicy.class);
+        AccessPolicyProviderPlugin plugin = () -> new ReadAccessPolicyProvider() {
+            @Override
+            public DocumentLevelReadAccessPolicy getDocumentLevelReadAccessPolicy(ReadAccessContext context) {
+                return expected;
+            }
+
+            @Override
+            public FieldValueTransformationPolicy getFieldValueTransformationPolicy(String concreteIndex) {
+                assertEquals("logs", concreteIndex);
+                return expectedFieldPolicy;
+            }
+        };
         ReadAccessPolicyService service = new ReadAccessPolicyService(List.of(plugin));
         service.initialize();
 
         assertSame(expected, service.getDocumentLevelReadAccessPolicy(context()));
+        assertSame(expectedFieldPolicy, service.getFieldValueTransformationPolicy("logs"));
     }
 
     public void testProviderIsResolvedAfterComponentCreation() {
@@ -44,14 +58,25 @@ public class ReadAccessPolicyServiceTests extends OpenSearchTestCase {
             "ReadAccessPolicyService is not initialized",
             expectThrows(IllegalStateException.class, () -> service.getDocumentLevelReadAccessPolicy(context())).getMessage()
         );
-        availableProvider.set(context -> expected);
+        assertEquals(
+            "ReadAccessPolicyService is not initialized",
+            expectThrows(IllegalStateException.class, () -> service.getFieldValueTransformationPolicy("logs")).getMessage()
+        );
+        availableProvider.set(provider(expected, FieldValueTransformationPolicy.unrestricted()));
         service.initialize();
         assertSame(expected, service.getDocumentLevelReadAccessPolicy(context()));
+        assertFalse(service.getFieldValueTransformationPolicy("logs").resolve("secret").isPresent());
     }
 
     public void testRejectsMultipleProviders() {
-        AccessPolicyProviderPlugin first = () -> context -> DocumentLevelReadAccessPolicy.unrestricted();
-        AccessPolicyProviderPlugin second = () -> context -> DocumentLevelReadAccessPolicy.unrestricted();
+        AccessPolicyProviderPlugin first = () -> provider(
+            DocumentLevelReadAccessPolicy.unrestricted(),
+            FieldValueTransformationPolicy.unrestricted()
+        );
+        AccessPolicyProviderPlugin second = () -> provider(
+            DocumentLevelReadAccessPolicy.unrestricted(),
+            FieldValueTransformationPolicy.unrestricted()
+        );
 
         IllegalStateException exception = expectThrows(
             IllegalStateException.class,
@@ -61,7 +86,7 @@ public class ReadAccessPolicyServiceTests extends OpenSearchTestCase {
     }
 
     public void testRejectsNullPolicy() {
-        AccessPolicyProviderPlugin plugin = () -> context -> null;
+        AccessPolicyProviderPlugin plugin = () -> provider(null, FieldValueTransformationPolicy.unrestricted());
         ReadAccessPolicyService service = new ReadAccessPolicyService(List.of(plugin));
         service.initialize();
 
@@ -70,6 +95,15 @@ public class ReadAccessPolicyServiceTests extends OpenSearchTestCase {
             () -> service.getDocumentLevelReadAccessPolicy(context())
         );
         assertEquals("ReadAccessPolicyProvider returned null", exception.getMessage());
+    }
+
+    public void testRejectsNullFieldValueTransformationPolicy() {
+        AccessPolicyProviderPlugin plugin = () -> provider(DocumentLevelReadAccessPolicy.unrestricted(), null);
+        ReadAccessPolicyService service = new ReadAccessPolicyService(List.of(plugin));
+        service.initialize();
+
+        NullPointerException exception = expectThrows(NullPointerException.class, () -> service.getFieldValueTransformationPolicy("logs"));
+        assertEquals("ReadAccessPolicyProvider returned null field-value transformation policy", exception.getMessage());
     }
 
     public void testRejectsNullProvider() {
@@ -81,5 +115,22 @@ public class ReadAccessPolicyServiceTests extends OpenSearchTestCase {
 
     private ReadAccessContext context() {
         return ReadAccessContext.of(List.of("logs"));
+    }
+
+    private static ReadAccessPolicyProvider provider(
+        DocumentLevelReadAccessPolicy documentPolicy,
+        FieldValueTransformationPolicy fieldPolicy
+    ) {
+        return new ReadAccessPolicyProvider() {
+            @Override
+            public DocumentLevelReadAccessPolicy getDocumentLevelReadAccessPolicy(ReadAccessContext context) {
+                return documentPolicy;
+            }
+
+            @Override
+            public FieldValueTransformationPolicy getFieldValueTransformationPolicy(String concreteIndex) {
+                return fieldPolicy;
+            }
+        };
     }
 }

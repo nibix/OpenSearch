@@ -17,6 +17,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.OpenSearchException;
+import org.opensearch.action.support.FieldValueTransformationPolicy;
 import org.opensearch.analytics.backend.AnalyticsOperationListener;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
@@ -56,7 +57,6 @@ import org.opensearch.index.engine.exec.IndexReaderProvider.Reader;
 import org.opensearch.index.mapper.FieldValueTransformation;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.shard.IndexShard;
-import org.opensearch.plugins.FieldValueTransformationProvider;
 import org.opensearch.tasks.Task;
 import org.opensearch.tasks.TaskResourceTrackingService;
 
@@ -68,9 +68,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.function.Function;
 
 /**
  * Data-node service that executes plan fragments against local shards.
@@ -119,20 +119,7 @@ public class AnalyticsSearchService implements AutoCloseable {
      */
     private final BufferAllocator importStagingAllocator;
     private final ArrowNativeAllocator nativeAllocator;
-    private final FieldValueTransformationProvider fieldValueTransformations;
-
-    public AnalyticsSearchService(Map<String, AnalyticsSearchBackendPlugin> backends, ArrowNativeAllocator nativeAllocator) {
-        this(backends, List.of(), nativeAllocator, null, null, FieldValueTransformationProvider.NOOP);
-    }
-
-    public AnalyticsSearchService(
-        Map<String, AnalyticsSearchBackendPlugin> backends,
-        ArrowNativeAllocator nativeAllocator,
-        NamedWriteableRegistry namedWriteableRegistry,
-        ReaderContextStore readerContextStore
-    ) {
-        this(backends, List.of(), nativeAllocator, namedWriteableRegistry, readerContextStore, FieldValueTransformationProvider.NOOP);
-    }
+    private final Function<String, FieldValueTransformationPolicy> fieldValueTransformationPolicies;
 
     public AnalyticsSearchService(
         Map<String, AnalyticsSearchBackendPlugin> backends,
@@ -140,7 +127,7 @@ public class AnalyticsSearchService implements AutoCloseable {
         ArrowNativeAllocator nativeAllocator,
         NamedWriteableRegistry namedWriteableRegistry,
         ReaderContextStore readerContextStore,
-        FieldValueTransformationProvider fieldValueTransformations
+        Function<String, FieldValueTransformationPolicy> fieldValueTransformationPolicies
     ) {
         this.backends = backends;
         this.listener = new AnalyticsOperationListener.CompositeListener(listeners);
@@ -161,7 +148,10 @@ public class AnalyticsSearchService implements AutoCloseable {
         this.importStagingAllocator = allocator.getRoot().newChildAllocator("arrow-import-staging", 0, Long.MAX_VALUE);
         this.namedWriteableRegistry = namedWriteableRegistry;
         this.readerContextStore = readerContextStore;
-        this.fieldValueTransformations = Objects.requireNonNull(fieldValueTransformations, "fieldValueTransformations");
+        this.fieldValueTransformationPolicies = Objects.requireNonNull(
+            fieldValueTransformationPolicies,
+            "fieldValueTransformationPolicies"
+        );
     }
 
     @Override
@@ -1174,20 +1164,27 @@ public class AnalyticsSearchService implements AutoCloseable {
         String concreteIndex,
         Set<String> requestedFields
     ) {
-        FieldValueTransformationProvider.FieldTransformations perField = Objects.requireNonNull(
-            fieldValueTransformations.forIndex(concreteIndex),
-            "field value transformation resolver returned null for index [" + concreteIndex + "]"
-        );
-        Map<String, FieldValueTransformation> resolved = new LinkedHashMap<>();
+        FieldValueTransformationPolicy perField = fieldValueTransformationPolicies.apply(concreteIndex);
+        Map<String, String> mappedFieldTypes = new LinkedHashMap<>();
         for (MappedFieldType mappedField : mapperService.fieldTypes()) {
             if (requestedFields != null && requestedFields.contains(mappedField.name()) == false) {
                 continue;
             }
-            Optional<FieldValueTransformation> transformation = Objects.requireNonNull(
-                perField.resolve(mappedField.name()),
-                "field value transformation resolver returned null for field [" + mappedField.name() + "]"
-            );
-            if (transformation.isEmpty()) {
+            mappedFieldTypes.put(mappedField.name(), mappedField.typeName());
+        }
+        Map<String, FieldValueTransformation> resolved = perField.resolve(mappedFieldTypes.keySet());
+        if (resolved.keySet().equals(mappedFieldTypes.keySet()) == false) {
+            throw new IllegalArgumentException("Incomplete field value transformations for [" + concreteIndex + "]");
+        }
+        Map<String, FieldValueTransformation> active = new LinkedHashMap<>();
+        for (Map.Entry<String, FieldValueTransformation> entry : resolved.entrySet()) {
+            String fieldName = entry.getKey();
+            String fieldType = mappedFieldTypes.get(fieldName);
+            FieldValueTransformation transformation = entry.getValue();
+            if (transformation == null) {
+                throw new IllegalArgumentException("Invalid field value transformation for [" + concreteIndex + "][" + fieldName + "]");
+            }
+            if (transformation.isPresent() == false) {
                 continue;
             }
             // The initial masking contract is deliberately limited to keyword and text fields.
@@ -1202,20 +1199,20 @@ public class AnalyticsSearchService implements AutoCloseable {
             // Even other string-like mapper types such as constant_keyword, wildcard, and
             // match_only_text need their planner schema, operator behavior, and physical Arrow
             // representations validated across both scan and fetch paths.
-            if ("keyword".equals(mappedField.typeName()) == false && "text".equals(mappedField.typeName()) == false) {
+            if ("keyword".equals(fieldType) == false && "text".equals(fieldType) == false) {
                 throw new IllegalArgumentException(
                     "Field value transformation for ["
                         + concreteIndex
                         + "]["
-                        + mappedField.name()
+                        + fieldName
                         + "] requires a text or keyword field but mapping type is ["
-                        + mappedField.typeName()
+                        + fieldType
                         + "]"
                 );
             }
-            resolved.put(mappedField.name(), transformation.get());
+            active.put(fieldName, transformation);
         }
-        return resolved;
+        return Map.copyOf(active);
     }
 
     // ── Assertion helpers (invoked only when -ea is enabled; bodies are dead in production) ──

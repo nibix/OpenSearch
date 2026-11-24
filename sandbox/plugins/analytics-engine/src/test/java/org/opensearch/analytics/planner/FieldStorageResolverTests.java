@@ -8,18 +8,19 @@
 
 package org.opensearch.analytics.planner;
 
+import org.opensearch.action.support.FieldValueTransformationPolicy;
 import org.opensearch.analytics.spi.FieldStorageInfo;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.MappingMetadata;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.index.Index;
 import org.opensearch.index.mapper.FieldValueTransformation;
-import org.opensearch.plugins.FieldValueTransformationProvider;
 import org.opensearch.test.OpenSearchTestCase;
 
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -70,11 +71,7 @@ public class FieldStorageResolverTests extends OpenSearchTestCase {
 
     public void testTextAndKeywordTransformationsMarkFieldsMasked() {
         for (String mappingType : List.of("text", "keyword")) {
-            FieldStorageResolver resolver = newResolver(
-                "parquet",
-                Map.of("secret", Map.of("type", mappingType)),
-                field -> Optional.of(new FieldValueTransformation.Hash(FieldValueTransformation.HashAlgorithm.SHA_256, new byte[0]))
-            );
+            FieldStorageResolver resolver = newResolver("parquet", Map.of("secret", Map.of("type", mappingType)), hashPolicy());
 
             assertTrue(mappingType, resolver.resolve(List.of("secret")).getFirst().isMasked());
         }
@@ -83,11 +80,7 @@ public class FieldStorageResolverTests extends OpenSearchTestCase {
     public void testTransformationOnUnsupportedMappingTypeFailsClosed() {
         IllegalArgumentException exception = expectThrows(
             IllegalArgumentException.class,
-            () -> newResolver(
-                "parquet",
-                Map.of("secret", Map.of("type", "long")),
-                field -> Optional.of(new FieldValueTransformation.Hash(FieldValueTransformation.HashAlgorithm.SHA_256, new byte[0]))
-            )
+            () -> newResolver("parquet", Map.of("secret", Map.of("type", "long")), hashPolicy())
         );
 
         assertEquals(
@@ -100,11 +93,7 @@ public class FieldStorageResolverTests extends OpenSearchTestCase {
         for (String mappingType : List.of("constant_keyword", "wildcard", "match_only_text")) {
             IllegalArgumentException exception = expectThrows(
                 IllegalArgumentException.class,
-                () -> newResolver(
-                    "parquet",
-                    Map.of("secret", Map.of("type", mappingType)),
-                    field -> Optional.of(new FieldValueTransformation.Hash(FieldValueTransformation.HashAlgorithm.SHA_256, new byte[0]))
-                )
+                () -> newResolver("parquet", Map.of("secret", Map.of("type", mappingType)), hashPolicy())
             );
 
             assertEquals(
@@ -194,14 +183,33 @@ public class FieldStorageResolverTests extends OpenSearchTestCase {
         return new FieldStorageResolver(indexMetadata);
     }
 
+    private static FieldValueTransformationPolicy hashPolicy() {
+        FieldValueTransformation hash = new FieldValueTransformation.Hash(FieldValueTransformation.HashAlgorithm.SHA_256, new byte[0]);
+        return new FieldValueTransformationPolicy() {
+            @Override
+            public FieldValueTransformation resolve(String mappedLeafField) {
+                return hash;
+            }
+
+            @Override
+            public Map<String, FieldValueTransformation> resolve(Collection<String> mappedLeafFields) {
+                Map<String, FieldValueTransformation> resolved = new HashMap<>();
+                for (String field : mappedLeafFields) {
+                    resolved.put(field, hash);
+                }
+                return Map.copyOf(resolved);
+            }
+        };
+    }
+
     private static FieldStorageResolver newResolver(String primaryFormat, Map<String, Map<String, Object>> fieldMappings) {
-        return newResolver(primaryFormat, fieldMappings, field -> Optional.empty());
+        return newResolver(primaryFormat, fieldMappings, FieldValueTransformationPolicy.unrestricted());
     }
 
     private static FieldStorageResolver newResolver(
         String primaryFormat,
         Map<String, Map<String, Object>> fieldMappings,
-        FieldValueTransformationProvider.FieldTransformations transformations
+        FieldValueTransformationPolicy transformations
     ) {
         Map<String, Object> mappingSource = Map.of("properties", fieldMappings);
 
