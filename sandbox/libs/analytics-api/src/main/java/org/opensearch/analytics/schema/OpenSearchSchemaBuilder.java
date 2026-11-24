@@ -26,11 +26,17 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.core.common.Strings;
 import org.opensearch.index.IndexNotFoundException;
+import org.opensearch.plugins.MapperPlugin;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -51,11 +57,15 @@ public class OpenSearchSchemaBuilder {
     private OpenSearchSchemaBuilder() {}
 
     public static SchemaPlus buildSchema(ClusterState clusterState) {
-        return buildSchema(clusterState, new IndexNameExpressionResolver(new ThreadContext(Settings.EMPTY)));
+        return buildSchema(
+            clusterState,
+            new IndexNameExpressionResolver(new ThreadContext(Settings.EMPTY)),
+            MapperPlugin.NOOP_FIELD_FILTER
+        );
     }
 
     /**
-     * Builds a Calcite SchemaPlus from the given ClusterState.
+     * Builds a Calcite SchemaPlus from the given ClusterState with the authoritative field-visibility filter applied.
      *
      * <p>Tables are resolved lazily on first lookup, mirroring the sql-plugin
      * {@code OpenSearchSchema}. A requested name may be a concrete index, an alias, a comma list,
@@ -65,11 +75,23 @@ public class OpenSearchSchemaBuilder {
      * indices: construction is O(1) regardless of cluster size, and each referenced name costs
      * one {@code IndexNameExpressionResolver} call plus a single mapping union.
      *
+     * <p>The outer function is evaluated for every concrete index resolved from a table expression. A field is exposed only when it is
+     * allowed by every resolved concrete index in which it exists. This fail-closed intersection prevents a union schema for an alias,
+     * wildcard, data stream, or comma expression from exposing values from an index that denies the field.
+     *
+     * <p>Filtering occurs while the lazy table is constructed, before Calcite resolves field names, expands {@code *}, validates the
+     * query, or creates a plan.
+     *
      * <p>The lazy schema is wrapped in a NON-caching root: a caching root enumerates
      * {@code getTableNames()} and would never perform the implicit {@code getTable(name)} lookup
      * that drives lazy resolution of expressions.
      */
-    public static SchemaPlus buildSchema(ClusterState clusterState, IndexNameExpressionResolver resolver) {
+    public static SchemaPlus buildSchema(
+        ClusterState clusterState,
+        IndexNameExpressionResolver resolver,
+        Function<String, Predicate<String>> fieldFilter
+    ) {
+        Objects.requireNonNull(fieldFilter, "fieldFilter");
         Schema lazySchema = new AbstractSchema() {
             // Truly lazy table map, mirroring sql-plugin's OpenSearchSchema pattern: no upfront
             // enumeration of cluster indices. get() registers on first lookup and caches under the
@@ -83,7 +105,7 @@ public class OpenSearchSchemaBuilder {
                 public Table get(Object key) {
                     String name = ((String) key).toLowerCase(java.util.Locale.ROOT);
                     if (!super.containsKey(name)) {
-                        Table resolved = resolveTable(clusterState, resolver, name);
+                        Table resolved = resolveTable(clusterState, resolver, fieldFilter, name);
                         if (resolved != null) {
                             super.put(name, resolved);
                         }
@@ -111,7 +133,12 @@ public class OpenSearchSchemaBuilder {
      * is referenced.
      */
     @SuppressWarnings("unchecked")
-    private static Table resolveTable(ClusterState clusterState, IndexNameExpressionResolver resolver, String expression) {
+    private static Table resolveTable(
+        ClusterState clusterState,
+        IndexNameExpressionResolver resolver,
+        Function<String, Predicate<String>> fieldFilter,
+        String expression
+    ) {
         // Short-circuit literal alias / data stream names so the resolver's lenientExpandOpen
         // (which does not include hidden backings) doesn't filter out data stream backings. The
         // alias / data-stream abstraction already carries the full backing list — use it directly.
@@ -149,6 +176,7 @@ public class OpenSearchSchemaBuilder {
             }
         }
         LinkedHashMap<String, Object> merged = new LinkedHashMap<>();
+        Set<String> deniedFields = new HashSet<>();
         for (IndexMetadata index : backing) {
             MappingMetadata mapping = index.mapping();
             if (mapping == null) {
@@ -158,12 +186,17 @@ public class OpenSearchSchemaBuilder {
             if (properties == null) {
                 continue;
             }
+            Predicate<String> fieldPredicate = Objects.requireNonNull(
+                fieldFilter.apply(index.getIndex().getName()),
+                "field filter returned null predicate for index [" + index.getIndex().getName() + "]"
+            );
+            collectDeniedLeafFields(properties, "", fieldPredicate, deniedFields);
             properties.forEach(merged::putIfAbsent);
         }
         if (merged.isEmpty()) {
             return null;
         }
-        return buildTable(merged);
+        return buildTable(merged, field -> deniedFields.contains(field) == false);
     }
 
     /**
@@ -324,12 +357,12 @@ public class OpenSearchSchemaBuilder {
         return typeFactory.createTypeWithNullability(base, true);
     }
 
-    private static AbstractTable buildTable(Map<String, Object> properties) {
+    private static AbstractTable buildTable(Map<String, Object> properties, Predicate<String> fieldPredicate) {
         return new AbstractTable() {
             @Override
             public RelDataType getRowType(RelDataTypeFactory typeFactory) {
                 RelDataTypeFactory.Builder builder = typeFactory.builder();
-                addLeafFields(builder, typeFactory, properties, "");
+                addLeafFields(builder, typeFactory, properties, "", fieldPredicate);
                 return builder.build();
             }
         };
@@ -340,7 +373,8 @@ public class OpenSearchSchemaBuilder {
         RelDataTypeFactory.Builder builder,
         RelDataTypeFactory typeFactory,
         Map<String, Object> properties,
-        String pathPrefix
+        String pathPrefix,
+        Predicate<String> fieldPredicate
     ) {
         for (Map.Entry<String, Object> fieldEntry : properties.entrySet()) {
             String fieldName = pathPrefix.isEmpty() ? fieldEntry.getKey() : pathPrefix + "." + fieldEntry.getKey();
@@ -351,12 +385,19 @@ public class OpenSearchSchemaBuilder {
             if (fieldType == null || "object".equals(fieldType)) {
                 Map<String, Object> nested = (Map<String, Object>) fieldProps.get("properties");
                 if (nested != null) {
-                    addLeafFields(builder, typeFactory, nested, fieldName);
+                    addLeafFields(builder, typeFactory, nested, fieldName, fieldPredicate);
                 }
                 continue;
             }
             // Nested type (array-of-sub-docs) is a different beast — deferred.
             if ("nested".equals(fieldType)) {
+                continue;
+            }
+            if (fieldPredicate.test(fieldName) == false) {
+                // Reached for a mapped, non-object leaf that an aggregated MapperPlugin field
+                // filter rejected in at least one resolved concrete index. Omitting it from the
+                // Calcite row type makes projections, filters, aggregations, sorts, joins, and
+                // function calls fail field resolution before logical or physical planning.
                 continue;
             }
             String format = (String) fieldProps.get("format");
@@ -377,6 +418,42 @@ public class OpenSearchSchemaBuilder {
                 columnType = typeFactory.createTypeWithNullability(columnType, true);
             }
             builder.add(fieldName, columnType);
+        }
+    }
+
+    /**
+     * Recursively finds mapped leaf fields rejected by one concrete index's field predicate.
+     *
+     * <p>Leaf names are recorded as full dotted paths in {@code deniedFields}. The caller invokes this method for every concrete index
+     * backing a table expression and shares the set between invocations, producing a fail-closed union of denied fields: rejection by any
+     * index removes that field from the final Calcite schema. Object mappings are traversed. Nested mappings are omitted consistently with
+     * {@link #addLeafFields}; the analytics representation of nested fields is discussed in
+     * <a href="https://github.com/opensearch-project/OpenSearch/issues/23030">OpenSearch issue #23030</a>.
+     */
+    @SuppressWarnings("unchecked")
+    private static void collectDeniedLeafFields(
+        Map<String, Object> properties,
+        String pathPrefix,
+        Predicate<String> fieldPredicate,
+        Set<String> deniedFields
+    ) {
+        for (Map.Entry<String, Object> fieldEntry : properties.entrySet()) {
+            String fieldName = pathPrefix.isEmpty() ? fieldEntry.getKey() : pathPrefix + "." + fieldEntry.getKey();
+            Map<String, Object> fieldProperties = (Map<String, Object>) fieldEntry.getValue();
+            String fieldType = (String) fieldProperties.get("type");
+            // A non-empty object mapping is commonly serialized with "properties" but without an
+            // explicit type because object is OpenSearch's default field type. Treat that shape and
+            // an explicit "type: object" identically so the predicate receives dotted leaf names.
+            if (fieldType == null || "object".equals(fieldType)) {
+                Map<String, Object> nested = (Map<String, Object>) fieldProperties.get("properties");
+                if (nested != null) {
+                    collectDeniedLeafFields(nested, fieldName, fieldPredicate, deniedFields);
+                }
+                continue;
+            }
+            if ("nested".equals(fieldType) == false && fieldPredicate.test(fieldName) == false) {
+                deniedFields.add(fieldName);
+            }
         }
     }
 

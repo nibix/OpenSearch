@@ -178,20 +178,22 @@ public class OpenSearchFilterRule extends RelOptRule {
             // routed to a backend that only declared (QUERY_STRING, TEXT) capability.
             if (function.getCategory() == ScalarFunction.Category.FULL_TEXT) {
                 if (TextRelevanceFieldValidator.usesLiteralFieldEncoding(function)) {
-                    // A backend that declares full-text capability for these multi-field functions
-                    // MUST register a DelegatedPredicateSerializer whose referencedFields() surfaces
-                    // the fields named inside the query string (not just the `fields` MAP). A missing
-                    // serializer (or one that does not implement referencedFields) is a wiring error,
-                    // not a query error — fail explicitly rather than under-validating.
+                    // Prefer the registered serializer because it owns the backend's precise operand
+                    // semantics. The planner fallback is mandatory when no serializer is installed:
+                    // schema/FLS validation must not depend on backend installation, particularly for
+                    // PPL search predicates whose field occurs only inside a query string.
                     DelegatedPredicateSerializer serializer = registry.predicateSerializer(function);
                     FieldReferences refs = serializer == null ? null : serializer.referencedFields(predicate, fieldStorageInfos);
                     if (refs == null) {
-                        throw new IllegalStateException(
-                            "No field-reference extraction available for full-text function ["
-                                + predicate.getOperator().getName()
-                                + "]. A backend declaring this function's filter capability must provide a"
-                                + " DelegatedPredicateSerializer that implements referencedFields()."
-                        );
+                        // Reached when no backend registered a serializer for this function, or when
+                        // the registered serializer uses the default referencedFields() implementation.
+                        // The fallback preserves ordinary schema validation by extracting literal and
+                        // in-string field names before backend selection, avoiding a backend-dependent
+                        // internal error for unknown fields. Separately, when field-level security is
+                        // active, denied fields have already been removed from the schema; the same
+                        // validation therefore reports them as "Field [...] not found" rather than
+                        // allowing the query to bypass the field filter.
+                        refs = TextRelevanceFieldExtractor.referencedFields(function, predicate);
                     }
                     List<String> literalFieldNames = refs.literalFields();
                     boolean lenient = refs.lenient();

@@ -512,6 +512,22 @@ public class FilterRuleTests extends BasePlannerRulesTests {
     }
 
     /**
+     * Field validation must not depend on a backend serializer being installed. This is the
+     * DataFusion-only shape used by the coordinator FLS test: the denied field was removed from the
+     * scan schema and occurs only inside the query string produced by the PPL search command.
+     */
+    public void testFieldlessQueryStringUnknownFieldRejectedWithoutBackendSerializer() {
+        RelOptTable table = mockTable("test_index", new String[] { "visible" }, new SqlTypeName[] { SqlTypeName.VARCHAR });
+        RexNode condition = makeFieldlessFullTextCall(fullTextSqlFunction("QUERY_STRING"), "secret:hidden");
+        LogicalFilter filter = LogicalFilter.create(stubScan(table), condition);
+        PlannerContext context = buildContext("parquet", Map.of("visible", Map.of("type", "keyword")), List.of(DATAFUSION));
+
+        IllegalArgumentException exception = expectThrows(IllegalArgumentException.class, () -> runPlanner(filter, context));
+        assertTrue("Error must name the unknown field: " + exception.getMessage(), exception.getMessage().contains("secret"));
+        assertTrue("Error must say not found: " + exception.getMessage(), exception.getMessage().contains("not found"));
+    }
+
+    /**
      * A wildcard field pattern (e.g. {@code ser*}) is classified as a pattern, not a literal, so it
      * is never type-checked or treated as an unknown field — it routes to the full-text backend and
      * is expanded at execution. Guards the empty-literals fallback against the unknown-field rejection

@@ -32,11 +32,16 @@ import org.opensearch.cluster.ClusterName;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.AliasMetadata;
 import org.opensearch.cluster.metadata.IndexMetadata;
+import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.metadata.Metadata;
+import org.opensearch.common.settings.Settings;
+import org.opensearch.common.util.concurrent.ThreadContext;
 import org.opensearch.test.OpenSearchTestCase;
 
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
 
@@ -743,6 +748,72 @@ public class OpenSearchSchemaBuilderTests extends OpenSearchTestCase {
         assertFieldType(rowType, "name", SqlTypeName.VARCHAR);
         assertFieldType(rowType, "age", SqlTypeName.BIGINT);
         assertFieldType(rowType, "alias_field", SqlTypeName.VARCHAR);
+    }
+
+    public void testFieldFilterRemovesDeniedFieldFromSchema() throws Exception {
+        ClusterState clusterState = buildClusterState(Map.of("secured", Map.of("visible", "keyword", "secret", "keyword")));
+
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(
+            clusterState,
+            new IndexNameExpressionResolver(new ThreadContext(Settings.EMPTY)),
+            index -> {
+                assertEquals("secured", index);
+                return field -> "secret".equals(field) == false;
+            }
+        );
+
+        RelDataType rowType = schema.getTable("secured").getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertFieldType(rowType, "visible", SqlTypeName.VARCHAR);
+        assertNull("denied field must be absent before query validation", rowType.getField("secret", true, false));
+        expectThrows(Exception.class, () -> parseValidateConvert(schema, "SELECT secret FROM secured"));
+    }
+
+    public void testFieldFilterUsesDottedLeafNamesForImplicitObjectMappings() throws Exception {
+        String mapping = "{\"properties\":{"
+            + "\"details\":{\"properties\":{"
+            + "\"visible\":{\"type\":\"keyword\"},"
+            + "\"secret\":{\"type\":\"keyword\"}}}}}";
+        ClusterState clusterState = buildClusterStateRaw("secured-object", mapping);
+        Set<String> filteredFields = new HashSet<>();
+
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(
+            clusterState,
+            new IndexNameExpressionResolver(new ThreadContext(Settings.EMPTY)),
+            index -> field -> {
+                filteredFields.add(field);
+                return "details.secret".equals(field) == false;
+            }
+        );
+
+        RelDataType rowType = schema.getTable("secured-object").getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertEquals(Set.of("details.visible", "details.secret"), filteredFields);
+        assertFieldType(rowType, "details.visible", SqlTypeName.VARCHAR);
+        assertNull("denied object leaf must be absent", rowType.getField("details.secret", true, false));
+    }
+
+    public void testFieldFilterUsesConcreteIndicesAndIntersectsUnionSchema() throws Exception {
+        ClusterState clusterState = buildClusterState(
+            Map.of("logs-a", Map.of("shared", "keyword", "only_a", "keyword"), "logs-b", Map.of("shared", "keyword", "only_b", "keyword"))
+        );
+        Set<String> filteredIndices = new HashSet<>();
+
+        SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(
+            clusterState,
+            new IndexNameExpressionResolver(new ThreadContext(Settings.EMPTY)),
+            index -> {
+                filteredIndices.add(index);
+                if ("logs-b".equals(index)) {
+                    return field -> "shared".equals(field) == false && "only_a".equals(field) == false;
+                }
+                return field -> true;
+            }
+        );
+
+        RelDataType rowType = schema.getTable("logs-*").getRowType(new org.apache.calcite.jdbc.JavaTypeFactoryImpl());
+        assertEquals(Set.of("logs-a", "logs-b"), filteredIndices);
+        assertNull("a field denied on any index where it exists must be hidden", rowType.getField("shared", true, false));
+        assertFieldType(rowType, "only_a", SqlTypeName.VARCHAR);
+        assertFieldType(rowType, "only_b", SqlTypeName.VARCHAR);
     }
 
     /**
