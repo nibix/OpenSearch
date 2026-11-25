@@ -14,7 +14,8 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * Index information supplied to a {@link ReadAccessPolicyProvider}.
+ * Index information supplied to a {@link ReadAccessPolicyProvider}. This context does not contain the user identity;
+ * the provider obtains the current read request's authorization context from the calling thread.
  *
  * @opensearch.experimental
  */

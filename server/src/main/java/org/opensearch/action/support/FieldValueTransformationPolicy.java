@@ -16,8 +16,11 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Field-value transformations for one concrete index and read request. Resolution must use the authorization
- * state captured when the provider created this policy; neither resolve method may depend on the calling thread's context.
+ * Field-value transformations for one concrete index and read request. A policy returned by
+ * {@link ReadAccessPolicyProvider#getFieldValueTransformationPolicy(String)} must retain any request-specific
+ * authorization information it needs. Its methods must not depend on the calling thread's context, so the policy can
+ * be used later on another thread during the same request. Transformations may be computed when the policy is created
+ * or when its methods are called.
  */
 @ExperimentalApi
 public interface FieldValueTransformationPolicy {

@@ -10,6 +10,7 @@ package org.opensearch.action.get;
 
 import org.opensearch.action.support.ActionFilters;
 import org.opensearch.action.support.DocumentLevelReadAccessPolicy;
+import org.opensearch.action.support.FieldValueTransformationPolicy;
 import org.opensearch.action.support.ReadAccessContext;
 import org.opensearch.action.support.ReadAccessPolicyProvider;
 import org.opensearch.action.support.ReadAccessPolicyService;
@@ -74,6 +75,11 @@ public class TransportShardMultiGetActionTests extends OpenSearchTestCase {
                 policyLookups.incrementAndGet();
                 policyContext.set(context);
                 return policy;
+            }
+
+            @Override
+            public FieldValueTransformationPolicy getFieldValueTransformationPolicy(String concreteIndex) {
+                return FieldValueTransformationPolicy.unrestricted();
             }
         };
         ReadAccessPolicyService policyService = new ReadAccessPolicyService(List.of(policyPlugin));
