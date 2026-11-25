@@ -87,7 +87,8 @@ public class ShardScanInstructionHandler implements FragmentInstructionHandler<S
                     requiresLiveDocs,
                     context.hasPartialAggregate(),
                     segment.address(),
-                    context.getFragmentBytes()
+                    context.getFragmentBytes(),
+                    FieldMaskingFfmCodec.encode(context.getFieldValueTransformations())
                 );
             } else {
                 sessionCtxHandle = NativeBridge.createSessionContext(
@@ -98,7 +99,8 @@ public class ShardScanInstructionHandler implements FragmentInstructionHandler<S
                     false,
                     context.hasPartialAggregate(),
                     segment.address(),
-                    context.getFragmentBytes()
+                    context.getFragmentBytes(),
+                    FieldMaskingFfmCodec.encode(context.getFieldValueTransformations())
                 );
             }
             return new DataFusionSessionState(sessionCtxHandle);

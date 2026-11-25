@@ -17,6 +17,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.OpenSearchException;
+import org.opensearch.action.support.FieldValueTransformationPolicy;
 import org.opensearch.analytics.backend.AnalyticsOperationListener;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
@@ -53,16 +54,23 @@ import org.opensearch.core.tasks.TaskCancelledException;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.engine.exec.IndexReaderProvider;
 import org.opensearch.index.engine.exec.IndexReaderProvider.Reader;
+import org.opensearch.index.mapper.FieldValueTransformation;
+import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.shard.IndexShard;
 import org.opensearch.tasks.Task;
 import org.opensearch.tasks.TaskResourceTrackingService;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.function.Function;
 
 /**
  * Data-node service that executes plan fragments against local shards.
@@ -111,26 +119,15 @@ public class AnalyticsSearchService implements AutoCloseable {
      */
     private final BufferAllocator importStagingAllocator;
     private final ArrowNativeAllocator nativeAllocator;
-
-    public AnalyticsSearchService(Map<String, AnalyticsSearchBackendPlugin> backends, ArrowNativeAllocator nativeAllocator) {
-        this(backends, List.of(), nativeAllocator, null, null);
-    }
-
-    public AnalyticsSearchService(
-        Map<String, AnalyticsSearchBackendPlugin> backends,
-        ArrowNativeAllocator nativeAllocator,
-        NamedWriteableRegistry namedWriteableRegistry,
-        ReaderContextStore readerContextStore
-    ) {
-        this(backends, List.of(), nativeAllocator, namedWriteableRegistry, readerContextStore);
-    }
+    private final Function<String, FieldValueTransformationPolicy> fieldValueTransformationPolicies;
 
     public AnalyticsSearchService(
         Map<String, AnalyticsSearchBackendPlugin> backends,
         List<AnalyticsOperationListener> listeners,
         ArrowNativeAllocator nativeAllocator,
         NamedWriteableRegistry namedWriteableRegistry,
-        ReaderContextStore readerContextStore
+        ReaderContextStore readerContextStore,
+        Function<String, FieldValueTransformationPolicy> fieldValueTransformationPolicies
     ) {
         this.backends = backends;
         this.listener = new AnalyticsOperationListener.CompositeListener(listeners);
@@ -151,6 +148,10 @@ public class AnalyticsSearchService implements AutoCloseable {
         this.importStagingAllocator = allocator.getRoot().newChildAllocator("arrow-import-staging", 0, Long.MAX_VALUE);
         this.namedWriteableRegistry = namedWriteableRegistry;
         this.readerContextStore = readerContextStore;
+        this.fieldValueTransformationPolicies = Objects.requireNonNull(
+            fieldValueTransformationPolicies,
+            "fieldValueTransformationPolicies"
+        );
     }
 
     @Override
@@ -754,6 +755,7 @@ public class AnalyticsSearchService implements AutoCloseable {
                 readerContext.getReader(),
                 rowIdVector,
                 columns,
+                resolveFieldValueTransformations(shard.mapperService(), shard.shardId().getIndexName(), new HashSet<>(List.of(columns))),
                 allocator,
                 task.getNativeTaskId(),
                 importStagingAllocator
@@ -1153,7 +1155,64 @@ public class AnalyticsSearchService implements AutoCloseable {
         ctx.setQueryCache(shard.getQueryCache());
         ctx.setQueryCachingPolicy(shard.getQueryCachingPolicy());
         ctx.setShardId(shard.shardId());
+        ctx.setFieldValueTransformations(resolveFieldValueTransformations(shard.mapperService(), tableName, null));
         return ctx;
+    }
+
+    private Map<String, FieldValueTransformation> resolveFieldValueTransformations(
+        org.opensearch.index.mapper.MapperService mapperService,
+        String concreteIndex,
+        Set<String> requestedFields
+    ) {
+        FieldValueTransformationPolicy perField = fieldValueTransformationPolicies.apply(concreteIndex);
+        Map<String, String> mappedFieldTypes = new LinkedHashMap<>();
+        for (MappedFieldType mappedField : mapperService.fieldTypes()) {
+            if (requestedFields != null && requestedFields.contains(mappedField.name()) == false) {
+                continue;
+            }
+            mappedFieldTypes.put(mappedField.name(), mappedField.typeName());
+        }
+        Map<String, FieldValueTransformation> resolved = perField.resolve(mappedFieldTypes.keySet());
+        if (resolved.keySet().equals(mappedFieldTypes.keySet()) == false) {
+            throw new IllegalArgumentException("Incomplete field value transformations for [" + concreteIndex + "]");
+        }
+        Map<String, FieldValueTransformation> active = new LinkedHashMap<>();
+        for (Map.Entry<String, FieldValueTransformation> entry : resolved.entrySet()) {
+            String fieldName = entry.getKey();
+            String fieldType = mappedFieldTypes.get(fieldName);
+            FieldValueTransformation transformation = entry.getValue();
+            if (transformation == null) {
+                throw new IllegalArgumentException("Invalid field value transformation for [" + concreteIndex + "][" + fieldName + "]");
+            }
+            if (transformation.isPresent() == false) {
+                continue;
+            }
+            // The initial masking contract is deliberately limited to keyword and text fields.
+            // Hash and regex replacement have defined UTF-8 string-in/string-out semantics, and
+            // the native readers apply them element-wise to both scalar and multi-valued strings.
+            // Dates, IP addresses, and geo fields are especially easy to mistake for strings
+            // because their APIs accept or render textual forms: dates are represented internally
+            // as epoch-based numbers, IP addresses as encoded address values, and geo points/shapes
+            // as numeric coordinates or encoded geometry.
+            // Their display syntax therefore cannot be masked as though it were
+            // the stored value without defining formatting, comparison, and result-type semantics.
+            // Even other string-like mapper types such as constant_keyword, wildcard, and
+            // match_only_text need their planner schema, operator behavior, and physical Arrow
+            // representations validated across both scan and fetch paths.
+            if ("keyword".equals(fieldType) == false && "text".equals(fieldType) == false) {
+                throw new IllegalArgumentException(
+                    "Field value transformation for ["
+                        + concreteIndex
+                        + "]["
+                        + fieldName
+                        + "] requires a text or keyword field but mapping type is ["
+                        + fieldType
+                        + "]"
+                );
+            }
+            active.put(fieldName, transformation);
+        }
+        return Map.copyOf(active);
     }
 
     // ── Assertion helpers (invoked only when -ea is enabled; bodies are dead in production) ──

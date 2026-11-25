@@ -17,8 +17,11 @@ import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.exec.IndexReaderProvider.Reader;
+import org.opensearch.index.mapper.FieldValueTransformation;
 import org.opensearch.index.mapper.MapperService;
 import org.opensearch.tasks.Task;
+
+import java.util.Map;
 
 /**
  * Execution context carrying reader and plan state through
@@ -42,6 +45,12 @@ public class ShardScanExecutionContext implements CommonExecutionContext {
     private QueryCachingPolicy queryCachingPolicy;
     private ShardId shardId;
     private boolean hasPartialAggregate;
+    /**
+     * Field-value transformations for this shard scan, keyed by the mapped field's full name (for example,
+     * {@code details.secret}). Each transformation describes how the backend must mask that field's raw payload values before making
+     * them available to query operators or returning them to the caller.
+     */
+    private Map<String, FieldValueTransformation> fieldValueTransformations = Map.of();
 
     /**
      * Constructs an execution context.
@@ -188,6 +197,15 @@ public class ShardScanExecutionContext implements CommonExecutionContext {
 
     public void setShardId(ShardId shardId) {
         this.shardId = shardId;
+    }
+
+    /** Transformations resolved locally for raw fields on this concrete shard index. */
+    public Map<String, FieldValueTransformation> getFieldValueTransformations() {
+        return fieldValueTransformations;
+    }
+
+    public void setFieldValueTransformations(Map<String, FieldValueTransformation> fieldValueTransformations) {
+        this.fieldValueTransformations = Map.copyOf(fieldValueTransformations);
     }
 
     /** Whether the fragment contains a PARTIAL aggregate instruction. */

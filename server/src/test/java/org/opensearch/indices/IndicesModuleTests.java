@@ -35,6 +35,7 @@ package org.opensearch.indices;
 import org.opensearch.index.mapper.DataStreamFieldMapper;
 import org.opensearch.index.mapper.DocCountFieldMapper;
 import org.opensearch.index.mapper.FieldNamesFieldMapper;
+import org.opensearch.index.mapper.FieldValueTransformation;
 import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.mapper.IgnoredFieldMapper;
 import org.opensearch.index.mapper.IndexFieldMapper;
@@ -263,6 +264,26 @@ public class IndicesModuleTests extends OpenSearchTestCase {
         IndicesModule indicesModule = new IndicesModule(mapperPlugins);
         Function<String, Predicate<String>> fieldFilter = indicesModule.getMapperRegistry().getFieldFilter();
         assertSame(MapperPlugin.NOOP_FIELD_FILTER, fieldFilter);
+    }
+
+    public void testFieldMaskingRegexRejectsNonPortableConstructs() {
+        IllegalArgumentException lookahead = expectThrows(
+            IllegalArgumentException.class,
+            () -> new FieldValueTransformation.RegexReplacement("a(?=b)", "x")
+        );
+        assertThat(lookahead.getMessage(), containsString("unsupported construct"));
+
+        IllegalArgumentException shorthand = expectThrows(
+            IllegalArgumentException.class,
+            () -> new FieldValueTransformation.RegexReplacement("\\d+", "x")
+        );
+        assertThat(shorthand.getMessage(), containsString("unsupported escape"));
+
+        IllegalArgumentException missingCapture = expectThrows(
+            IllegalArgumentException.class,
+            () -> new FieldValueTransformation.RegexReplacement("(a)", "$2")
+        );
+        assertThat(missingCapture.getMessage(), containsString("references capture $2 but the pattern has 1 captures"));
     }
 
     public void testNoOpFieldPredicate() {

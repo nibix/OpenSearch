@@ -8,13 +8,17 @@
 
 package org.opensearch.analytics.planner;
 
+import org.opensearch.action.support.FieldValueTransformationPolicy;
 import org.opensearch.analytics.spi.FieldStorageInfo;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.metadata.MappingMetadata;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.index.Index;
+import org.opensearch.index.mapper.FieldValueTransformation;
 import org.opensearch.test.OpenSearchTestCase;
 
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -63,6 +67,60 @@ public class FieldStorageResolverTests extends OpenSearchTestCase {
         assertEquals("age", info.getFieldName());
         assertEquals(List.of("parquet"), info.getDocValueFormats());
         assertEquals(List.of("lucene"), info.getIndexFormats());
+    }
+
+    public void testTextAndKeywordTransformationsMarkFieldsMasked() {
+        for (String mappingType : List.of("text", "keyword")) {
+            FieldStorageResolver resolver = newResolver("parquet", Map.of("secret", Map.of("type", mappingType)), hashPolicy());
+
+            assertTrue(mappingType, resolver.resolve(List.of("secret")).getFirst().isMasked());
+        }
+    }
+
+    public void testTransformationOnUnsupportedMappingTypeFailsClosed() {
+        IllegalArgumentException exception = expectThrows(
+            IllegalArgumentException.class,
+            () -> newResolver("parquet", Map.of("secret", Map.of("type", "long")), hashPolicy())
+        );
+
+        assertEquals(
+            "Field value transformation for [test_index][secret] requires a text or keyword field but mapping type is [long]",
+            exception.getMessage()
+        );
+    }
+
+    public void testOtherStringLikeMappingTypesFailClosed() {
+        for (String mappingType : List.of("constant_keyword", "wildcard", "match_only_text")) {
+            IllegalArgumentException exception = expectThrows(
+                IllegalArgumentException.class,
+                () -> newResolver("parquet", Map.of("secret", Map.of("type", mappingType)), hashPolicy())
+            );
+
+            assertEquals(
+                "Field value transformation for [test_index][secret] requires a text or keyword field but mapping type is ["
+                    + mappingType
+                    + "]",
+                exception.getMessage()
+            );
+        }
+    }
+
+    public void testObjectLeavesAreResolvedByDottedPathAndNestedMappingsAreIgnored() {
+        FieldStorageResolver resolver = newResolver(
+            "parquet",
+            Map.of(
+                "details",
+                Map.of("type", "object", "properties", Map.of("secret", Map.of("type", "keyword"))),
+                "events",
+                Map.of("type", "nested", "properties", Map.of("secret", Map.of("type", "keyword")))
+            )
+        );
+
+        assertEquals("details.secret", resolver.resolve(List.of("details.secret")).getFirst().getFieldName());
+        assertTrue(
+            expectThrows(IllegalArgumentException.class, () -> resolver.resolve(List.of("events.secret"))).getMessage()
+                .contains("not found")
+        );
     }
 
     public void testFieldWithAllStorageDisabledHasNoStorage() {
@@ -125,7 +183,34 @@ public class FieldStorageResolverTests extends OpenSearchTestCase {
         return new FieldStorageResolver(indexMetadata);
     }
 
+    private static FieldValueTransformationPolicy hashPolicy() {
+        FieldValueTransformation hash = new FieldValueTransformation.Hash(FieldValueTransformation.HashAlgorithm.SHA_256, new byte[0]);
+        return new FieldValueTransformationPolicy() {
+            @Override
+            public FieldValueTransformation resolve(String mappedLeafField) {
+                return hash;
+            }
+
+            @Override
+            public Map<String, FieldValueTransformation> resolve(Collection<String> mappedLeafFields) {
+                Map<String, FieldValueTransformation> resolved = new HashMap<>();
+                for (String field : mappedLeafFields) {
+                    resolved.put(field, hash);
+                }
+                return Map.copyOf(resolved);
+            }
+        };
+    }
+
     private static FieldStorageResolver newResolver(String primaryFormat, Map<String, Map<String, Object>> fieldMappings) {
+        return newResolver(primaryFormat, fieldMappings, FieldValueTransformationPolicy.unrestricted());
+    }
+
+    private static FieldStorageResolver newResolver(
+        String primaryFormat,
+        Map<String, Map<String, Object>> fieldMappings,
+        FieldValueTransformationPolicy transformations
+    ) {
         Map<String, Object> mappingSource = Map.of("properties", fieldMappings);
 
         MappingMetadata mappingMetadata = mock(MappingMetadata.class);
@@ -141,6 +226,6 @@ public class FieldStorageResolverTests extends OpenSearchTestCase {
         );
         when(indexMetadata.mapping()).thenReturn(mappingMetadata);
 
-        return new FieldStorageResolver(indexMetadata);
+        return new FieldStorageResolver(indexMetadata, index -> transformations);
     }
 }
